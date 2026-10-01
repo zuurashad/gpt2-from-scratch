@@ -1,0 +1,12 @@
+# token shards, checkpoints and benchmark data — these default to C:/ml/nanogpt now,
+# but ignore the in-tree paths too in case anyone points --data-dir/--log-dir back here
+edu_fineweb10B/
+hellaswag/
+log/
+bench/
+*.npy
+*.pt
+
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
