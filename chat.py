@@ -4,6 +4,7 @@ Interactive generation for a trained checkpoint, with a KV cache.
     python chat.py --checkpoint C:/ml/nanogpt/log/model_004767.pt --mode complete
     python chat.py --model gpt2 --mode complete          # sanity-check against real GPT-2
     python chat.py --checkpoint path/to/sft.pt --mode chat
+    python chat.py --checkpoint path/to/export/chat --mode chat   # an export.py folder
 
 TWO MODES, AND THE DIFFERENCE MATTERS
   --mode complete : the honest mode for a freshly pretrained model. A base LM is a
@@ -26,6 +27,8 @@ the difference between a usable REPL and a slideshow.
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 
 import torch
@@ -51,23 +54,89 @@ B_ASSISTANT = "<|assistant|>\n"
 EOT_ID = 50256
 
 
-def build_chat_ids(history, enc, system=SYSTEM_DEFAULT):
+def build_chat_ids(history, enc, system=SYSTEM_DEFAULT, max_tokens=None):
     """history: list of (role, text) -> token ids, ending where the model continues.
 
     allowed_special=set() keeps the angle-bracket role markers as ordinary text; the
     only genuinely special token in the sequence is the EOT_ID appended by hand.
+
+    max_tokens caps the prompt so the reply still fits in the context window. A long
+    conversation loses WHOLE turns from the front, oldest first, and never the system
+    prompt. Cutting raw tokens off the front instead deletes the system prompt and
+    can start the model reading mid-turn, a format it never saw during fine-tuning.
     """
-    ids = enc.encode(B_SYS + system, allowed_special=set()) + [EOT_ID]
+    prefix = enc.encode(B_SYS + system, allowed_special=set()) + [EOT_ID]
+    turns = []
     for role, text in history:
         head = B_USER if role == "user" else B_ASSISTANT
-        ids += enc.encode(head + text, allowed_special=set()) + [EOT_ID]
-    ids += enc.encode(B_ASSISTANT, allowed_special=set())   # model continues from here
-    return ids
+        turns.append(enc.encode(head + text, allowed_special=set()) + [EOT_ID])
+    tail = enc.encode(B_ASSISTANT, allowed_special=set())   # model continues from here
+
+    if max_tokens is not None:
+        budget = max_tokens - len(prefix) - len(tail)
+        start, used = len(turns), 0
+        while start > 0 and used + len(turns[start - 1]) <= budget:
+            start -= 1
+            used += len(turns[start])
+        # a window opening on an assistant turn is an answer to a question the model
+        # cannot see; drop it as well (but never the newest turn)
+        while start < len(turns) - 1 and history[start][0] != "user":
+            start += 1
+        if turns and start == len(turns):
+            # even the newest turn alone is too long: keep its END, which is where the
+            # question usually sits in a long paste
+            role, text = history[-1]
+            head = enc.encode(B_USER if role == "user" else B_ASSISTANT, allowed_special=set())
+            room = budget - len(head) - 1
+            if room <= 0:
+                raise ValueError(f"max_tokens={max_tokens} leaves no room for a message")
+            body = enc.encode(text, allowed_special=set())[-room:]
+            turns[-1] = head + body + [EOT_ID]
+            start = len(turns) - 1
+        turns = turns[start:]
+
+    return prefix + [t for turn in turns for t in turn] + tail
+
+
+# The head is tied to the token embedding (one tensor, two names), and safetensors
+# refuses to serialise aliased storage, so export.py writes it once under
+# transformer.wte.weight and the model's own tying restores lm_head on load.
+TIED_KEY = "lm_head.weight"
+CONFIG_FIELDS = ("block_size", "vocab_size", "n_layer", "n_head", "n_embd")
+
+
+def load_exported(path):
+    """Load an export.py folder (model.safetensors + config.json) -> (model, meta).
+
+    The weights file is plain tensors, unlike a .pt checkpoint, which is a pickle that
+    can execute code when loaded - this is the format to hand to anyone else.
+    """
+    from safetensors.torch import load_file
+
+    folder = path if os.path.isdir(path) else os.path.dirname(path)
+    weights = path if path.endswith(".safetensors") else os.path.join(folder, "model.safetensors")
+    with open(os.path.join(folder, "config.json"), encoding="utf-8") as f:
+        meta = json.load(f)
+    model = GPT(GPTconfig(**{k: meta[k] for k in CONFIG_FIELDS}))
+    # half-precision exports are widened back: CPU maths is fp32 either way
+    state = {k: v.float() for k, v in load_file(weights).items()}
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if unexpected or set(missing) != {TIED_KEY}:
+        raise ValueError(f"{weights}: missing keys {missing}, unexpected keys {unexpected}")
+    assert model.lm_head.weight is model.transformer.wte.weight, "weight tying was lost"
+    return model, meta
 
 
 def load_model(checkpoint=None, hf_model="gpt2", device="cuda"):
-    if checkpoint:
-        ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    if checkpoint and (os.path.isdir(checkpoint) or checkpoint.endswith(".safetensors")):
+        model, meta = load_exported(checkpoint)
+        print(f"loaded {checkpoint} ({meta.get('stage')}, step {meta.get('step')}, "
+              f"val_loss {meta.get('val_loss')})", file=sys.stderr)
+    elif checkpoint:
+        # our own checkpoint, so unpickling is trusted. mmap: a training checkpoint is
+        # ~1.5GB, two thirds of it optimiser state that inference never touches, and
+        # mapping the file keeps that off the heap instead of reading it all in
+        ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False, mmap=True)
         cfg = ckpt["config"]
         model = GPT(GPTconfig(**cfg) if isinstance(cfg, dict) else cfg)
         model.load_state_dict(ckpt["model"])
@@ -129,7 +198,7 @@ def generate_stream(model, enc, prompt_ids, device, max_new_tokens=256,
 
     for _ in range(max_new_tokens):
         if (past[0][0].size(2) if past else 0) + step_input.size(1) >= block_size:
-            break   # context full; a real product would re-summarise here
+            break   # context full; build_chat_ids(max_tokens=...) keeps room for a reply
         ctx = (torch.autocast(device_type=device.split(":")[0], dtype=autocast_dtype)
                if autocast_dtype else torch.autocast(device_type="cpu", enabled=False))
         with ctx:
@@ -146,23 +215,51 @@ def generate_stream(model, enc, prompt_ids, device, max_new_tokens=256,
 
         tok = int(nxt.item())
         if stop_ids and tok in stop_ids:
-            return      # exact, single-integer stop - no string matching to get wrong
+            break       # exact, single-integer stop - no string matching to get wrong
         generated.append(tok)
         step_input = nxt
 
-        # decode the whole run each time and emit only the new tail: a multi-byte
-        # character can span two tokens, and decoding tokens individually would
-        # emit replacement characters at those boundaries
-        piece = enc.decode(generated)[len(text):]
-        text += piece
+        # decode the whole run each time and emit only the new tail. A multi-byte
+        # character (an emoji, most non-Latin scripts) can span several byte-level
+        # tokens, and until its last byte arrives the decode ends in U+FFFD. Emitting
+        # that would print a replacement character that the completing token cannot
+        # take back, so output is held while the decode ends mid-character.
+        full = enc.decode(generated)
+        if full.endswith("�"):
+            continue
+        piece, text = full[len(text):], full
         yield piece
+
+    # flush anything still held back: generation stopped mid-character, or the model
+    # produced a byte sequence that never completes
+    full = enc.decode(generated)
+    if len(full) > len(text):
+        yield full[len(text):]
+
+
+def resolve_autocast_dtype(name, device):
+    """'auto' -> bf16 autocast on a GPU that supports it, plain fp32 everywhere else.
+
+    On CPU, fp32 is the safe default. bf16 autocast only pays off where the CPU has
+    native bf16 matmul. On the AVX-512 laptop CPU this was developed on, 124M decoding
+    ran at 19 tok/s fp32 vs 27 tok/s bf16 with 4 threads, but with no gain at 2 threads.
+    Elsewhere it just adds a cast to every op, and it always changes the numerics.
+    """
+    on_gpu = device.startswith("cuda")
+    if name == "auto":
+        name = "bf16" if on_gpu and torch.cuda.is_bf16_supported() else "fp32"
+    dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": None}[name]
+    if dtype is torch.bfloat16 and on_gpu and not torch.cuda.is_bf16_supported():
+        dtype = None
+    return dtype
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     src = p.add_mutually_exclusive_group()
-    src.add_argument("--checkpoint", default=None, help="one of our own .pt checkpoints")
+    src.add_argument("--checkpoint", default=None,
+                     help="one of our own .pt checkpoints, or an export.py folder")
     src.add_argument("--model", default="gpt2", help="HF checkpoint name, for comparison")
     p.add_argument("--mode", default="complete", choices=["complete", "chat"])
     p.add_argument("--system", default=SYSTEM_DEFAULT)
@@ -172,15 +269,13 @@ def main(argv=None):
     p.add_argument("--top-p", type=float, default=0.95, help="1.0 disables")
     p.add_argument("--repetition-penalty", type=float, default=1.1, help="1.0 disables")
     p.add_argument("--device", default=None)
-    p.add_argument("--dtype", default="bf16", choices=["bf16", "fp16", "fp32"])
+    p.add_argument("--dtype", default="auto", choices=["auto", "bf16", "fp16", "fp32"],
+                   help="auto = bf16 on a GPU that supports it, fp32 on CPU")
     p.add_argument("--seed", type=int, default=None)
     args = p.parse_args(argv)
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    autocast_dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": None}[args.dtype]
-    if autocast_dtype is torch.bfloat16 and device.startswith("cuda") \
-            and not torch.cuda.is_bf16_supported():
-        autocast_dtype = None
+    autocast_dtype = resolve_autocast_dtype(args.dtype, device)
 
     import tiktoken
     enc = tiktoken.get_encoding("gpt2")
@@ -209,7 +304,8 @@ def main(argv=None):
 
         if args.mode == "chat":
             history.append(("user", user))
-            ids = build_chat_ids(history, enc, args.system)
+            ids = build_chat_ids(history, enc, args.system,
+                                 max_tokens=model.config.block_size - args.max_new_tokens)
             stop = {EOT_ID}
             print("bot> ", end="", flush=True)
         else:
