@@ -7,6 +7,14 @@ bench/
 *.npy
 *.pt
 
+# exported weights are published to the Hugging Face Hub, not git
+export/
+*.safetensors
+
 __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
+.pytest_cache/
+.gradio/
+venv*/
+.venv/
