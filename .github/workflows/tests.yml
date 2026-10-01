@@ -1,0 +1,36 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    name: unit tests (CPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install CPU PyTorch and test dependencies
+        run: |
+          pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy tiktoken safetensors pytest
+      - run: pytest -q
+
+  gpt2-equivalence:
+    name: numerical equivalence with OpenAI GPT-2
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install CPU PyTorch and transformers
+        run: |
+          pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy transformers==5.16.1
+      # loads OpenAI's 124M weights into our GPT and compares logits with Hugging Face's
+      # reference implementation (also covers the KV cache and gradient checkpointing)
+      - run: python test_hf_equivalence.py
