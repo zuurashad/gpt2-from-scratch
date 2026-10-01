@@ -672,10 +672,11 @@ def build_parser():
                    help="tokens per optimiser step; gradient accumulation is derived from it")
 
     g = p.add_argument_group("optimisation")
-    # 4768 steps x 524288 tokens = 2.5B tokens, ~39h at the ~18.2k tok/s this card
-    # actually sustains (B=4, no checkpointing, no compile). The 19073/715 pair that
-    # Karpathy uses is one full epoch over the 10B sample: ~153h here, and ~20GB of
-    # shards. Pass --max-steps 19073 --warmup-steps 715 to run the full thing.
+    # 4768 steps x 524288 tokens = 2.5B tokens, ~34h at the ~20.6k tok/s this card sustains
+    # on AC power (B=4, compiled, measured with AdamW state resident). Uncompiled B=4 spills
+    # into shared memory once that state exists and drops to ~11k tok/s (~62h). The 19073/715
+    # pair that Karpathy uses is one full epoch over the 10B sample: ~135h here, and ~20GB
+    # of shards. Pass --max-steps 19073 --warmup-steps 715 to run the full thing.
     g.add_argument("--max-steps", type=int, default=4768,
                    help="optimiser steps (default: 2.5B tokens; 19073 = full 10B epoch)")
     g.add_argument("--warmup-steps", type=int, default=179,
@@ -711,7 +712,9 @@ def build_parser():
     g = p.add_argument_group("performance")
     g.add_argument("--grad-checkpoint", action="store_true",
                    help="recompute each transformer block in backward to save activation memory")
-    g.add_argument("--compile", action="store_true", help="wrap the model in torch.compile")
+    g.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True,
+                   help="wrap the model in torch.compile (on Windows needs MSVC cl.exe on PATH, "
+                        "e.g. the x64 Native Tools prompt)")
     g.add_argument("--dtype", default="bf16", choices=["bf16", "fp16", "fp32"],
                    help="autocast dtype for forward/loss (fp32 = autocast off)")
     g.add_argument("--device", default=None, help="e.g. cuda, cuda:0, cpu (default: cuda if available)")
@@ -781,8 +784,9 @@ def main(argv=None):
                     model.config.n_layer)
     raw_model = model    # the un-wrapped module: what gets saved, optimised and configured
     if args.compile:
-        # off by default: Triton codegen is still shaky on Windows, and compile's
-        # CUDA-graph buffers raise peak VRAM, which fights the whole point of this setup.
+        # default mode builds no CUDA graphs, and fusing the fp32 logits/loss cuts peak VRAM
+        # ~2GB: on the 6GB 4050, B=4 only fits without spilling into shared system memory
+        # (a silent ~30% slowdown under WDDM) when compiled.
         model = torch.compile(model)
 
     min_lr = args.max_lr * args.min_lr_ratio
@@ -887,7 +891,8 @@ def main(argv=None):
         if hellaswag_eval is not None and (
                 (step % args.hellaswag_every == 0 and step > 0) or last_step):
             try:
-                hella = hellaswag_eval(model, device, device_type, autocast_dtype,
+                # raw_model: variable-length eval/sampling shapes would trigger recompiles
+                hella = hellaswag_eval(raw_model, device, device_type, autocast_dtype,
                                        limit=args.hellaswag_limit or None,
                                        block_size=raw_model.config.block_size)
             except Exception as e:  # noqa: BLE001 - a failed download must not kill a long run
@@ -903,7 +908,7 @@ def main(argv=None):
 
         # periodically sample
         if can_sample and args.sample_every and ((step % args.sample_every == 0 and step > 0) or last_step):
-            samples = generate_samples(model, device, device_type, autocast_dtype, enc,
+            samples = generate_samples(raw_model, device, device_type, autocast_dtype, enc,
                                        seed=args.seed + step)
             for s in samples:
                 logger.info("sample> %s", s.replace("\n", " "))
@@ -976,7 +981,7 @@ def main(argv=None):
 
     logger.info("training finished at step %d", args.max_steps - 1)
     if can_sample:
-        samples = generate_samples(model, device, device_type, autocast_dtype, enc,
+        samples = generate_samples(raw_model, device, device_type, autocast_dtype, enc,
                                    num_return_sequences=5, max_length=30, seed=42)
         for s in samples:
             logger.info("> %s", s.replace("\n", " "))
