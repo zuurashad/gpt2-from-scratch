@@ -33,26 +33,36 @@ from torch.nn import functional as F
 
 from train_gpt2_refined import GPT, GPTconfig
 
-# A minimal ChatML-style template. The exact tokens do not matter, but they MUST be
-# byte-identical between sft.py and here, or the fine-tuned model sees a format it was
-# never trained on and falls back to babbling.
+# A minimal ChatML-style template. It MUST be byte-identical between sft.py and here,
+# or the fine-tuned model sees a format it was never trained on and falls back to
+# babbling.
+#
+# END-OF-TURN IS A SINGLE TOKEN, NOT A STRING. The obvious design is a text marker
+# like "<|end|>", but GPT-2's BPE splits that into five ordinary tokens, so stopping
+# means the model has to emit all five in the right order and the caller has to
+# string-match them. An early checkpoint emits "<|end>" instead and generation runs
+# on past it. Token 50256 (<|endoftext|>) is one token, is already in the vocabulary,
+# and already means "a document just ended" after pretraining - so it is both far
+# faster to learn and exactly detectable by comparing one integer.
 SYSTEM_DEFAULT = "You are a helpful assistant."
-B_SYS, E_SYS = "<|system|>\n", "\n<|end|>\n"
-B_USER, E_USER = "<|user|>\n", "\n<|end|>\n"
-B_ASSISTANT, E_ASSISTANT = "<|assistant|>\n", "\n<|end|>\n"
-STOP_MARKER = "<|end|>"
+B_SYS = "<|system|>\n"
+B_USER = "<|user|>\n"
+B_ASSISTANT = "<|assistant|>\n"
+EOT_ID = 50256
 
 
-def build_chat_prompt(history, system=SYSTEM_DEFAULT):
-    """history: list of (role, text). Returns the string to tokenise."""
-    parts = [B_SYS + system + E_SYS]
+def build_chat_ids(history, enc, system=SYSTEM_DEFAULT):
+    """history: list of (role, text) -> token ids, ending where the model continues.
+
+    allowed_special=set() keeps the angle-bracket role markers as ordinary text; the
+    only genuinely special token in the sequence is the EOT_ID appended by hand.
+    """
+    ids = enc.encode(B_SYS + system, allowed_special=set()) + [EOT_ID]
     for role, text in history:
-        if role == "user":
-            parts.append(B_USER + text + E_USER)
-        else:
-            parts.append(B_ASSISTANT + text + E_ASSISTANT)
-    parts.append(B_ASSISTANT)       # the model continues from here
-    return "".join(parts)
+        head = B_USER if role == "user" else B_ASSISTANT
+        ids += enc.encode(head + text, allowed_special=set()) + [EOT_ID]
+    ids += enc.encode(B_ASSISTANT, allowed_special=set())   # model continues from here
+    return ids
 
 
 def load_model(checkpoint=None, hf_model="gpt2", device="cuda"):
@@ -103,7 +113,7 @@ def _filter_logits(logits, top_k, top_p, repetition_penalty, generated, n_vocab)
 @torch.no_grad()
 def generate_stream(model, enc, prompt_ids, device, max_new_tokens=256,
                     temperature=0.8, top_k=50, top_p=0.95, repetition_penalty=1.1,
-                    autocast_dtype=None, stop_text=None, seed=None):
+                    autocast_dtype=None, stop_ids=None, seed=None):
     """Yield decoded text fragments as they are produced."""
     block_size = model.config.block_size
     if len(prompt_ids) >= block_size:
@@ -135,14 +145,16 @@ def generate_stream(model, enc, prompt_ids, device, max_new_tokens=256,
             nxt = torch.multinomial(F.softmax(logits, dim=-1), 1, generator=gen)
 
         tok = int(nxt.item())
+        if stop_ids and tok in stop_ids:
+            return      # exact, single-integer stop - no string matching to get wrong
         generated.append(tok)
         step_input = nxt
 
+        # decode the whole run each time and emit only the new tail: a multi-byte
+        # character can span two tokens, and decoding tokens individually would
+        # emit replacement characters at those boundaries
         piece = enc.decode(generated)[len(text):]
         text += piece
-        if stop_text and stop_text in text:
-            yield piece.split(stop_text)[0]
-            return
         yield piece
 
 
@@ -197,20 +209,19 @@ def main(argv=None):
 
         if args.mode == "chat":
             history.append(("user", user))
-            prompt = build_chat_prompt(history, args.system)
-            stop = STOP_MARKER
+            ids = build_chat_ids(history, enc, args.system)
+            stop = {EOT_ID}
             print("bot> ", end="", flush=True)
         else:
-            prompt = user
-            stop = None
+            ids = enc.encode(user, allowed_special=set())
+            # a base model emits <|endoftext|> at a document boundary; honouring it
+            # keeps completions from running into unrelated text
+            stop = {EOT_ID}
             print(user, end="", flush=True)
 
-        # allowed_special=() keeps the template's angle-bracket markers as ordinary
-        # text; they are only special if an SFT run actually added them to the vocab
-        ids = enc.encode(prompt, allowed_special=set())
         reply = ""
         try:
-            for piece in generate_stream(model, enc, ids, device, stop_text=stop, **kw):
+            for piece in generate_stream(model, enc, ids, device, stop_ids=stop, **kw):
                 reply += piece
                 print(piece, end="", flush=True)
         except KeyboardInterrupt:
