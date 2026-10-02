@@ -1,28 +1,23 @@
 """
-Publish the exported models and the demo to the Hugging Face Hub.
+Publish the two models and the in-browser demo to the Hugging Face Hub.
 
     hf auth login                     # once, with a token that has write access
-    python publish.py --base C:/ml/nanogpt/export/base --chat C:/ml/nanogpt/export/chat \
-                      --bundle-weights                  # a private trial of the Space
-    python publish.py ... --evals evals_ours.json --baseline evals_gpt2.json --public
-    python publish.py ... --dry-run                     # assemble and list, upload nothing
+    python publish.py --base C:/ml/nanogpt/web/base --chat C:/ml/nanogpt/web/chat \
+                      --evals evals_ours.json --baseline evals_gpt2.json          # private
+    python publish.py ... --public                      # release, once everything checks out
+    python publish.py ... --dry-run                     # show what would be uploaded
 
-Repos are created private, and stay private, unless --public is given.
+--base/--chat are export_web.py folders. Three repos:
+  model  <user>/gpt2-from-scratch        the pretrained base model
+  model  <user>/gpt2-from-scratch-chat   the same model after supervised fine-tuning
+  Space  <user>/gpt2-from-scratch        a static page (web/) that runs both models in
+                                         the visitor's browser (static Spaces are free)
+The page downloads the int8 ONNX files straight from the model repos, so the demo only
+works logged out once those are public.
 
-Two repos share one name, <user>/gpt2-from-scratch:
-  model  base/ and chat/ export folders (safetensors + config.json) plus a model card
-  Space  the Gradio app; at build time it preloads the model repo's weights, so a
-         visitor never waits for a download.
-The Hub can only preload from a PUBLIC model repo. A private trial therefore bundles
-the weights into the Space itself (--bundle-weights) and skips the model repo.
-
-ORDER OF A PUBLIC RELEASE
-Everything is uploaded while private, and each repo only turns public once it is
-complete (weights, card, licence), so a failure half way never leaves a public repo
-without its README or attribution. The model repo goes public before the Space is
-uploaded, because the Space's build preloads from it. The Space's history is squashed
-before it goes public, so weights bundled during a private trial don't stay
-downloadable from old commits.
+Repos are created private, and stay private, unless --public is given. A public release
+uploads everything while private first, then publishes the model repos, and the Space
+last, so nothing is ever public in a half-uploaded state.
 """
 
 from __future__ import annotations
@@ -36,15 +31,21 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_URL = "https://github.com/zuurashad/gpt2-from-scratch"
-# LICENSE travels with the code: train_gpt2_refined.py derives from MIT-licensed
-# build-nanogpt, and MIT requires the notice in every copy
-SPACE_CODE = ["app.py", "chat.py", "train_gpt2_refined.py", "LICENSE"]
-EXPORT_FILES = ["config.json", "model.safetensors"]
+NAME = "gpt2-from-scratch"
+MODEL_FILES = ["config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json",
+               "vocab.json", "merges.txt", "model.safetensors", "onnx/model_quantized.onnx",
+               "training.json", "quantisation.json"]
+WEB_FILES = ["index.html", "app.js", "template.js", "style.css"]
 
 
 def read(path):
     with open(os.path.join(HERE, path), encoding="utf-8") as f:
         return f.read()
+
+
+def load_json(folder, name):
+    with open(os.path.join(folder, name), encoding="utf-8") as f:
+        return json.load(f)
 
 
 def fill(template, values):
@@ -55,23 +56,23 @@ def fill(template, values):
     return template
 
 
-def app_requirements():
-    """-> (Space requirements.txt text, gradio version). A Space installs gradio itself
-    at the README's sdk_version, so it is pinned there rather than in requirements."""
-    lines, gradio = [], None
-    for line in read("requirements-app.txt").splitlines():
-        if line.strip().lower().startswith("gradio=="):
-            gradio = line.split("==", 1)[1].strip()
-        elif line.strip() and not line.lstrip().startswith("#"):
-            lines.append(line)
-    if gradio is None:
-        raise SystemExit("requirements-app.txt must pin gradio==<version>")
-    return "\n".join(lines) + "\n", gradio
+def repo_ids(user):
+    return {"base": f"{user}/{NAME}", "chat": f"{user}/{NAME}-chat", "space": f"{user}/{NAME}"}
 
 
-def eval_table(ours_path, baseline_path):
+def check_pair(base, chat):
+    """The cards say the chat model is the base model after fine-tuning: make sure."""
+    if base.get("stage") != "base" or chat.get("stage") != "sft":
+        raise SystemExit(f"--base/--chat stages are {base.get('stage')!r}/{chat.get('stage')!r}; "
+                         "expected 'base'/'sft'")
+    if chat.get("base_checkpoint") != base.get("source_checkpoint"):
+        raise SystemExit(f"the chat model was fine-tuned from {chat.get('base_checkpoint')}, "
+                         f"but --base was exported from {base.get('source_checkpoint')}")
+
+
+def eval_section(ours_path, baseline_path):
     if not ours_path:
-        return "_Not yet evaluated._"
+        return ""
 
     def load(path):
         if not path:
@@ -84,7 +85,11 @@ def eval_table(ours_path, baseline_path):
         v = (r or {}).get(key)
         return "-" if v is None else (f"{v:.2f}" if key == "ppl" else f"{100 * v:.1f}%")
 
-    rows = ["| task | metric | this model | OpenAI GPT-2 124M |", "|---|---|---|---|"]
+    rows = ["## Evaluation", "",
+            "Zero-shot, in fp32, scored by per-choice log-likelihood (`acc`, and "
+            "length-normalised `acc_norm` as in lm-evaluation-harness). The baseline is "
+            "OpenAI's GPT-2 124M through the same harness.", "",
+            "| task | metric | this model | OpenAI GPT-2 124M |", "|---|---|---|---|"]
     for task, r in ours.items():
         if "error" in r:
             continue
@@ -92,78 +97,66 @@ def eval_table(ours_path, baseline_path):
         rows.append(f"| {task} | {key} | {cell(r, key)} | {cell(base.get(task), key)} |")
         if "ppl" in r:
             rows.append(f"| {task} | perplexity | {cell(r, 'ppl')} | {cell(base.get(task), 'ppl')} |")
-    hs = ours.get("hellaswag") or {}
-    note = (f"\n\nHellaSwag uses the full validation set ({hs['num_total']:,} examples)."
-            if hs.get("num_total") else "")
-    return "\n".join(rows) + note
+    return "\n".join(rows)
 
 
-def model_card(base_meta, chat_meta, model_id, space_id, evals, baseline):
-    args = base_meta.get("train_args") or {}
-    tokens = "?"
-    if base_meta.get("step") is not None and args.get("total_batch_size"):
+def model_card(kind, folder, ids, evals=None, baseline=None):
+    meta = load_json(folder, "training.json")
+    quant = load_json(folder, "quantisation.json")
+    args = meta.get("train_args") or {}
+    base_meta = meta if kind == "base" else None
+    tokens = "2.5B"
+    if base_meta and base_meta.get("step") is not None and args.get("total_batch_size"):
         tokens = f"{(base_meta['step'] + 1) * args['total_batch_size'] / 1e9:.1f}B"
-    val = base_meta.get("val_loss")
-    dataset = (chat_meta.get("train_args") or {}).get("dataset")
-    if not dataset:
-        raise SystemExit("the chat export's config.json names no SFT dataset")
+    if kind == "base":
+        title = "GPT-2 (124M), trained from scratch: base model"
+        intro = (f"The pretrained model: {tokens} tokens of FineWeb-Edu, validation loss "
+                 f"{meta['val_loss']:.4f}. It continues text; it was not trained to follow "
+                 "instructions.")
+        datasets = "  - HuggingFaceFW/fineweb-edu"
+        prompt, chat_note = '"Photosynthesis is the process by which"', ""
+    else:
+        title = "GPT-2 (124M), trained from scratch: chat model"
+        intro = (f"[{ids['base']}](https://huggingface.co/{ids['base']}) after supervised "
+                 f"fine-tuning on `{args.get('dataset')}` (loss on the answers only).")
+        datasets = "  - HuggingFaceFW/fineweb-edu\n  - databricks/databricks-dolly-15k"
+        prompt = ('"<|system|>\\nYou are a helpful assistant.<|endoftext|><|user|>\\n'
+                  'What is photosynthesis?<|endoftext|><|assistant|>\\n"')
+        chat_note = ("\nThe model expects the chat template it was fine-tuned on (as above): "
+                     "each turn is `<|system|>`, `<|user|>` or `<|assistant|>` plus a newline "
+                     "and the text, ended by the single token `<|endoftext|>` (id 50256), where "
+                     "it also stops. The role markers are plain text, not special tokens.\n")
     return fill(read("space/MODEL_CARD.md"), {
-        "REPO_URL": REPO_URL, "REPO_NAME": REPO_URL.rsplit("/", 1)[1],
-        "REPO_DISPLAY": REPO_URL.removeprefix("https://"),
-        "SPACE_URL": f"https://huggingface.co/spaces/{space_id}", "MODEL_REPO": model_id,
-        "TOKENS": tokens, "BASE_VAL_LOSS": "n/a" if val is None else f"{val:.4f}",
-        "SFT_DATASET": dataset, "EVAL_TABLE": eval_table(evals, baseline),
+        "TITLE": title, "INTRO": intro, "DATASETS_YAML": datasets,
+        "REPO_URL": REPO_URL, "REPO_DISPLAY": REPO_URL.removeprefix("https://"),
+        "SPACE_URL": f"https://huggingface.co/spaces/{ids['space']}",
+        "REPO_ID": ids[kind], "EXAMPLE_PROMPT": prompt, "CHAT_NOTE": chat_note,
+        "Q8_DELTA": f"{quant['int8_minus_fp32']:.4f}", "Q8_TOKENS": f"{quant['tokens']:,}",
+        "TOKENS": tokens,
+        "EVAL_SECTION": eval_section(evals, baseline) if kind == "base" else "",
     })
 
 
-def copy_export(src, dst):
-    """Copy only the two files an export consists of, never whatever else sits in the
-    folder (a .pt pickle, logs with local paths)."""
-    os.makedirs(dst, exist_ok=True)
-    for name in EXPORT_FILES:
-        shutil.copy2(os.path.join(src, name), dst)
-
-
-def assemble_space(stage, model_id, bundle, base_dir, chat_dir):
-    requirements, gradio = app_requirements()
-    for name in SPACE_CODE:
-        shutil.copy2(os.path.join(HERE, name), stage)
-    with open(os.path.join(stage, "requirements.txt"), "w", encoding="utf-8") as f:
-        f.write(requirements)
-    preload = "" if bundle else (
-        f"models:\n  - {model_id}\npreload_from_hub:\n  - {model_id} "
-        "base/config.json,base/model.safetensors,chat/config.json,chat/model.safetensors\n")
-    readme = fill(read("space/README.md"), {"SDK_VERSION": gradio, "PRELOAD": preload,
-                                            "REPO_DISPLAY": REPO_URL.removeprefix("https://"),
-                                            "REPO_URL": REPO_URL})
+def assemble_space(stage, ids):
+    app = read("web/app.js")
+    for kind in ("base", "chat"):
+        if f'"{ids[kind]}"' not in app:
+            raise SystemExit(f"web/app.js does not load {ids[kind]}; update MODELS there")
+    for name in WEB_FILES:
+        shutil.copy2(os.path.join(HERE, "web", name), stage)
+    shutil.copy2(os.path.join(HERE, "LICENSE"), stage)
+    readme = fill(read("space/README.md"), {
+        "BASE_REPO": ids["base"], "CHAT_REPO": ids["chat"], "REPO_URL": REPO_URL,
+        "REPO_DISPLAY": REPO_URL.removeprefix("https://")})
     with open(os.path.join(stage, "README.md"), "w", encoding="utf-8") as f:
         f.write(readme)
-    if bundle:   # app.py picks these up from models/ next to itself
-        copy_export(base_dir, os.path.join(stage, "models", "base"))
-        copy_export(chat_dir, os.path.join(stage, "models", "chat"))
-
-
-def load_meta(folder):
-    with open(os.path.join(folder, "config.json"), encoding="utf-8") as f:
-        return json.load(f)
-
-
-def check_pair(base_meta, chat_meta):
-    """The card says chat/ is base/ after fine-tuning; make sure that is true."""
-    if base_meta.get("stage") != "base" or chat_meta.get("stage") != "sft":
-        raise SystemExit(f"--base/--chat stages are {base_meta.get('stage')!r}/"
-                         f"{chat_meta.get('stage')!r}; expected 'base'/'sft'")
-    if chat_meta.get("base_checkpoint") != base_meta.get("source_checkpoint"):
-        raise SystemExit(f"the chat model was fine-tuned from {chat_meta.get('base_checkpoint')}, "
-                         f"but --base was exported from {base_meta.get('source_checkpoint')}")
 
 
 def build_parser():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--base", required=True, help="export.py folder of the base model")
-    p.add_argument("--chat", required=True, help="export.py folder of the SFT model")
-    p.add_argument("--name", default="gpt2-from-scratch")
+    p.add_argument("--base", required=True, help="export_web.py folder of the base model")
+    p.add_argument("--chat", required=True, help="export_web.py folder of the chat model")
     p.add_argument("--user", default=None, help="Hub namespace (default: the logged-in user)")
     p.add_argument("--evals", default=None, help="evals.py --out JSON for the base model")
     p.add_argument("--baseline", default=None, help="evals.py --out JSON for OpenAI gpt2")
@@ -171,68 +164,51 @@ def build_parser():
     # repo to public
     p.add_argument("--public", action="store_true",
                    help="make the repos public (default: create/keep them private)")
-    p.add_argument("--bundle-weights", action="store_true",
-                   help="put the weights inside the Space instead of a model repo")
     p.add_argument("--dry-run", action="store_true")
     return p
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    if not args.public and not args.bundle_weights and not args.dry_run:
-        raise SystemExit("a private deploy needs --bundle-weights: the Hub cannot preload "
-                         "a Space's weights from a private model repo")
-    base_meta, chat_meta = load_meta(args.base), load_meta(args.chat)
-    check_pair(base_meta, chat_meta)
+    check_pair(load_json(args.base, "training.json"), load_json(args.chat, "training.json"))
 
     from huggingface_hub import HfApi
     api = HfApi()
     user = args.user or ("<user>" if args.dry_run else api.whoami()["name"])
-    model_id = space_id = f"{user}/{args.name}"
+    ids = repo_ids(user)
+    folders = {"base": args.base, "chat": args.chat}
 
     with tempfile.TemporaryDirectory() as stage:
-        assemble_space(stage, model_id, args.bundle_weights, args.base, args.chat)
-        card = model_card(base_meta, chat_meta, model_id, space_id, args.evals, args.baseline)
+        assemble_space(stage, ids)
+        cards = {k: model_card(k, folders[k], ids, args.evals, args.baseline) for k in folders}
         if args.dry_run:
-            for root, _, files in os.walk(stage):
-                for name in files:
-                    path = os.path.join(root, name)
-                    print(f"space: {os.path.relpath(path, stage)}  ({os.path.getsize(path):,} B)")
-            if not args.bundle_weights:
-                print(f"model: base/, chat/ and README.md ->\n{card}")
+            for kind, folder in folders.items():
+                present = [f for f in MODEL_FILES if os.path.exists(os.path.join(folder, f))]
+                print(f"model {ids[kind]}: {present} + README.md")
+            print(f"space {ids['space']}: {sorted(os.listdir(stage))}")
+            print(cards["base"])
             return 0
 
         print(f"visibility: {'PUBLIC' if args.public else 'private'}", file=sys.stderr)
-        if not args.bundle_weights:
-            # complete the model repo while private, then (if asked) publish it, BEFORE
-            # the Space build that preloads from it
-            api.create_repo(model_id, repo_type="model", private=True, exist_ok=True)
-            for sub, folder in (("base", args.base), ("chat", args.chat)):
-                api.upload_folder(repo_id=model_id, folder_path=folder, path_in_repo=sub,
-                                  allow_patterns=EXPORT_FILES,
-                                  commit_message=f"upload {sub} model")
-            api.upload_file(repo_id=model_id, path_or_fileobj=card.encode("utf-8"),
+        for kind, folder in folders.items():
+            api.create_repo(repo_id=ids[kind], repo_type="model", private=True, exist_ok=True)
+            api.upload_folder(repo_id=ids[kind], folder_path=folder, allow_patterns=MODEL_FILES,
+                              commit_message=f"upload the {kind} model")
+            api.upload_file(repo_id=ids[kind], path_or_fileobj=cards[kind].encode("utf-8"),
                             path_in_repo="README.md", commit_message="model card")
-            if args.public:
-                api.update_repo_settings(model_id, repo_type="model", private=False)
-
-        api.create_repo(space_id, repo_type="space", space_sdk="gradio", private=True,
+        api.create_repo(repo_id=ids["space"], repo_type="space", space_sdk="static", private=True,
                         exist_ok=True)
-        if not args.bundle_weights:
-            api.add_space_variable(space_id, "MODEL_REPO", model_id)
-        api.upload_folder(repo_id=space_id, repo_type="space", folder_path=stage,
-                          commit_message="deploy demo",
-                          # weights live in the model repo unless bundled: clear old copies
-                          delete_patterns=None if args.bundle_weights else ["models/**"])
+        api.upload_folder(repo_id=ids["space"], repo_type="space", folder_path=stage,
+                          commit_message="deploy the demo")
         if args.public:
-            # one commit of history, so a private trial's bundled weights are gone
-            api.super_squash_history(repo_id=space_id, repo_type="space",
-                                     commit_message="deploy demo")
-            api.update_repo_settings(space_id, repo_type="space", private=False)
+            # the models first: the page fetches them, so the Space goes public last
+            for kind in folders:
+                api.update_repo_settings(repo_id=ids[kind], repo_type="model", private=False)
+            api.update_repo_settings(repo_id=ids["space"], repo_type="space", private=False)
 
-    if not args.bundle_weights:
-        print(f"model: https://huggingface.co/{model_id}")
-    print(f"space: https://huggingface.co/spaces/{space_id}")
+    for kind in folders:
+        print(f"{kind}: https://huggingface.co/{ids[kind]}")
+    print(f"demo: https://huggingface.co/spaces/{ids['space']}")
     return 0
 
 

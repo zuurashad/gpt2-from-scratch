@@ -27,7 +27,9 @@ _Pretraining is in progress. This section is filled in from the final logs._
 | [`sft.py`](sft.py) | supervised fine-tuning on instruction data, with the loss masked to the answers |
 | [`chat.py`](chat.py) | inference: KV cache, sampling, chat template, terminal chat |
 | [`export.py`](export.py) | checkpoint → `safetensors` + `config.json`, with a bit-exact round-trip check |
-| [`app.py`](app.py), [`publish.py`](publish.py), [`space/`](space) | the Gradio demo and its deployment to Hugging Face |
+| [`export_hf.py`](export_hf.py), [`export_web.py`](export_web.py) | standard Hugging Face GPT-2 format, then int8 ONNX for the browser, with the quality cost measured |
+| [`web/`](web), [`publish.py`](publish.py), [`space/`](space) | the in-browser demo (transformers.js) and its deployment to Hugging Face |
+| [`app.py`](app.py) | the same chat as a local Gradio server, running `chat.py` |
 | [`bench_throughput.py`](bench_throughput.py) | tokens/s and peak VRAM for one training configuration, before and after the optimiser state exists ([results](results/throughput.md)) |
 | [`bench_grad_checkpoint.py`](bench_grad_checkpoint.py) | the earlier gradient-checkpointing sweep (times forward/backward only; see below) |
 | [`plot_training.py`](plot_training.py) | the training-curve figure, from the run's metrics |
@@ -160,9 +162,17 @@ builds at inference time.
 - bf16 would halve the size, but it measurably changes a fully trained model's
   predictions, so the published weights are fp32.
 
-The demo is a Gradio app on a free Hugging Face CPU Space. It runs the same `chat.py`
-code as the terminal chat. The weights are preloaded when the Space is built, so a cold
-start doesn't wait on a download.
+The demo runs entirely in the visitor's browser, so there is no server to pay for, sleep
+or go down. [`export_hf.py`](export_hf.py) writes the weights in the standard Hugging Face
+GPT-2 layout, which matches this repo's model to 1e-5 and needs no custom code.
+[`export_web.py`](export_web.py) turns that into an int8 ONNX graph with a KV cache:
+- about 125MB instead of 500MB
+- validation loss changes by less than 0.001 (measured, written alongside the weights)
+
+The page itself ([`web/`](web)) uses transformers.js on WebAssembly. Its chat template
+is ported line for line from `chat.py`, and a test runs it in a headless browser to
+check that it builds token-identical prompts. On a laptop CPU it generates over 20
+tokens/s.
 
 ## Reproduce it
 
@@ -194,11 +204,15 @@ python export.py <sft-dir>/sft_final.pt export/chat
 python chat.py --checkpoint export/chat --mode chat          # chat in the terminal
 ```
 
-Run the demo locally (CPU only):
+Package the models for the browser, and run the demo or a local server (CPU only):
 
 ```bash
+pip install "optimum-onnx[onnxruntime]" accelerate   # in a separate environment
+python export_web.py export/base web-models/base
+python export_web.py export/chat web-models/chat
+
 pip install -r requirements-app.txt
-python app.py --chat-model export/chat --base-model export/base
+python app.py --chat-model export/chat --base-model export/base   # Gradio server
 ```
 
 Tests: `pytest` (fast, CPU) and `python test_hf_equivalence.py` (downloads GPT-2).

@@ -2,66 +2,61 @@
 license: mit
 language:
   - en
+library_name: transformers
+pipeline_tag: text-generation
 tags:
   - gpt2
-  - text-generation
   - from-scratch
-  - pytorch
+  - onnx
+  - transformers.js
 datasets:
-  - HuggingFaceFW/fineweb-edu
-  - {{SFT_DATASET}}
-pipeline_tag: text-generation
+{{DATASETS_YAML}}
 ---
 
-# GPT-2 (124M), trained from scratch
+# {{TITLE}}
 
-Weights for **[{{REPO_DISPLAY}}]({{REPO_URL}})**, a from-scratch PyTorch reproduction of
-GPT-2 small. Try it in the browser: **[live demo]({{SPACE_URL}})**.
+{{INTRO}} Part of **[{{REPO_DISPLAY}}]({{REPO_URL}})**, a PyTorch reproduction of
+GPT-2 small trained from scratch on a single 6GB laptop GPU.
+**[Try it in your browser]({{SPACE_URL}})**.
 
-| folder | what it is |
+The architecture is exactly GPT-2 small: 12 layers, 12 heads, width 768, a 1024-token
+context and the GPT-2 BPE tokenizer. The weights load into Hugging Face's
+`GPT2LMHeadModel` unchanged.
+
+## Files
+
+| file | what it is |
 |---|---|
-| `base/` | pretrained on {{TOKENS}} tokens of FineWeb-Edu (validation loss {{BASE_VAL_LOSS}}) |
-| `chat/` | `base/` after supervised fine-tuning on `{{SFT_DATASET}}` |
-
-Each folder holds `model.safetensors` and `config.json`.
-
-The architecture is exactly GPT-2 small: 12 layers, 12 heads, width 768, 1024-token
-context and the GPT-2 BPE tokenizer. The token embedding (tied to the output head) is
-padded from 50,257 to 50,304 rows for tensor-core-friendly shapes. The padding rows
-have no tokenizer entry, and the repo's sampler masks them out. Mask them in any
-other decoder too.
-
-## Evaluation
-
-Zero-shot, in fp32, scored by per-choice log-likelihood (`acc`, and length-normalised
-`acc_norm` as in lm-evaluation-harness). The baseline is OpenAI's GPT-2 124M, run
-through the same harness.
-
-{{EVAL_TABLE}}
+| `model.safetensors` | full-precision (fp32) weights |
+| `onnx/model_quantized.onnx` | int8 ONNX for the browser demo. Validation loss +{{Q8_DELTA}} vs fp32 ({{Q8_TOKENS}} FineWeb-Edu tokens) |
+| `training.json` | training step, validation loss and the training arguments |
 
 ## Use it
 
-```bash
-git clone {{REPO_URL}}
-cd {{REPO_NAME}}
-pip install -r requirements-app.txt
-hf download {{MODEL_REPO}} --local-dir weights
-python chat.py --checkpoint weights/chat --mode chat        # or weights/base --mode complete
+```python
+from transformers import pipeline
+
+generate = pipeline("text-generation", model="{{REPO_ID}}")
+print(generate({{EXAMPLE_PROMPT}}, max_new_tokens=60)[0]["generated_text"])
 ```
+{{CHAT_NOTE}}
+In the browser, with [transformers.js](https://huggingface.co/docs/transformers.js):
+`await AutoModelForCausalLM.from_pretrained("{{REPO_ID}}", { dtype: "q8" })`.
+
+{{EVAL_SECTION}}
 
 ## Limitations
 
 This is a 124M-parameter model trained on {{TOKENS}} tokens. It writes fluent English,
 but it is frequently wrong, especially about facts, arithmetic and recent events. Its
 only alignment is supervised fine-tuning on a small instruction dataset, so it can
-produce incorrect or inappropriate text. It is a learning project, not a product.
+produce incorrect or inappropriate text.
 
 ## Data and licences
 
 - Pretraining: [FineWeb-Edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu)
   (ODC-By 1.0)
-- Fine-tuning: [{{SFT_DATASET}}](https://huggingface.co/datasets/{{SFT_DATASET}}),
-  licensed CC BY-SA 3.0. The `chat/` weights are an adaptation of it, so treat them as
-  share-alike.
+- Fine-tuning (chat model only): [databricks-dolly-15k](https://huggingface.co/datasets/databricks/databricks-dolly-15k),
+  licensed CC BY-SA 3.0. Treat the chat weights as share-alike.
 - Code: MIT, derived in part from Andrej Karpathy's
   [build-nanogpt](https://github.com/karpathy/build-nanogpt) (MIT)

@@ -1,6 +1,6 @@
-"""publish.py must never make anything public by accident, and must publish each repo
-only once it is complete. The Hub is faked: every call is checked against the real
-HfApi signature and recorded, with no network."""
+"""publish.py must never make anything public by accident, must publish each repo only
+once it is complete, and the Space last. The Hub is faked: every call is checked
+against the real HfApi signature and recorded, with no network."""
 
 import inspect
 import json
@@ -12,17 +12,18 @@ import publish
 
 
 def _export(folder, stage, source, base=None):
-    os.makedirs(folder)
+    os.makedirs(os.path.join(folder, "onnx"))
     meta = {"stage": stage, "source_checkpoint": source, "base_checkpoint": base,
             "val_loss": 3.1, "step": 4767,
             "train_args": {"total_batch_size": 524288,
                            "dataset": "databricks/databricks-dolly-15k"}}
-    with open(os.path.join(folder, "config.json"), "w") as f:
-        json.dump(meta, f)
-    with open(os.path.join(folder, "model.safetensors"), "wb") as f:
-        f.write(b"weights")
-    with open(os.path.join(folder, "sft_final.pt"), "wb") as f:   # must never be uploaded
-        f.write(b"a pickle")
+    files = {"training.json": json.dumps(meta),
+             "quantisation.json": json.dumps({"int8_minus_fp32": 0.0008, "tokens": 51200}),
+             "config.json": "{}", "model.safetensors": "w", "onnx/model_quantized.onnx": "q",
+             "sft_final.pt": "a pickle that must never be uploaded"}
+    for name, text in files.items():
+        with open(os.path.join(folder, name), "w", encoding="utf-8") as f:
+            f.write(text)
     return str(folder)
 
 
@@ -53,8 +54,10 @@ def hub(monkeypatch):
                     call["files"] = sorted(
                         os.path.relpath(os.path.join(d, f), root).replace("\\", "/")
                         for d, _, files in os.walk(root) for f in files)
+                if name == "upload_file":
+                    call["text"] = kwargs["path_or_fileobj"].decode("utf-8")
                 calls.append(call)
-                return {"name": "tester"} if name == "whoami" else None
+                return {"name": "zuu007"} if name == "whoami" else None
             return record
 
     monkeypatch.setattr(huggingface_hub, "HfApi", FakeHfApi)
@@ -66,48 +69,40 @@ def test_repos_are_private_unless_public_is_asked_for():
     assert args.public is False
 
 
-def test_a_private_deploy_must_bundle_its_weights(exports):
-    # the Hub cannot preload a Space's weights from a private model repo
-    with pytest.raises(SystemExit, match="bundle-weights"):
-        publish.main(exports)
-
-
-def test_a_private_trial_never_touches_visibility(exports, hub):
-    publish.main(exports + ["--bundle-weights"])
+def test_a_private_upload_never_touches_visibility(exports, hub):
+    publish.main(exports)
     assert not [c for c in hub if c["call"] == "update_repo_settings"]
     assert all(c["private"] for c in hub if c["call"] == "create_repo")
-    [space] = [c for c in hub if c["call"] == "upload_folder"]
-    assert "models/chat/model.safetensors" in space["files"]
-    assert not [f for f in space["files"] if f.endswith(".pt")], "a pickle was bundled"
-    assert "LICENSE" in space["files"]
+    for c in hub:
+        if c["call"] == "upload_folder" and c.get("repo_type") is None:
+            assert c["allow_patterns"] == publish.MODEL_FILES     # never the stray .pt
+    [space] = [c for c in hub if c["call"] == "upload_folder" and c.get("repo_type") == "space"]
+    assert space["files"] == sorted(publish.WEB_FILES + ["LICENSE", "README.md"])
 
 
 def test_a_public_release_publishes_each_repo_only_once_complete(exports, hub):
-    publish.main(exports + ["--public", "--user", "tester"])
-    order = [(c["call"], c.get("repo_type", "model")) for c in hub]
-    flip_model = order.index(("update_repo_settings", "model"))
-    flip_space = order.index(("update_repo_settings", "space"))
-    # the model repo is complete (weights + card) before it goes public ...
-    assert max(i for i, c in enumerate(hub) if c.get("repo_type", "model") == "model"
-               and c["call"] in ("upload_folder", "upload_file")) < flip_model
-    # ... and public before the Space build that preloads from it is triggered
-    assert flip_model < order.index(("upload_folder", "space"))
-    # the Space's history is squashed, then it goes public as the very last call
-    assert order.index(("super_squash_history", "space")) < flip_space == len(hub) - 1
-    assert all(c["private"] is False for c in hub if c["call"] == "update_repo_settings")
-    for c in hub:
-        if c["call"] == "upload_folder" and c.get("repo_type") is None:
-            assert c["allow_patterns"] == publish.EXPORT_FILES
+    publish.main(exports + ["--public", "--user", "zuu007"])
+    flips = [i for i, c in enumerate(hub) if c["call"] == "update_repo_settings"]
+    uploads = [i for i, c in enumerate(hub) if c["call"] in ("upload_folder", "upload_file")]
+    assert len(flips) == 3 and max(uploads) < min(flips)    # nothing public half-uploaded
+    assert hub[-1] == {"call": "update_repo_settings", "repo_id": "zuu007/gpt2-from-scratch",
+                       "repo_type": "space", "private": False}   # the page goes public last
+
+
+def test_model_cards_are_filled_in(exports, hub):
+    publish.main(exports + ["--user", "zuu007"])
+    cards = [c["text"] for c in hub if c["call"] == "upload_file"]
+    assert len(cards) == 2 and all("{{" not in card for card in cards)
+    assert all("+0.0008" in card for card in cards)          # the int8 cost is stated
 
 
 def test_a_chat_model_from_a_different_base_is_refused(tmp_path, hub):
     base = _export(tmp_path / "base", "base", "model_004767.pt")
     chat = _export(tmp_path / "chat", "sft", "sft_final.pt", base="model_000500.pt")
     with pytest.raises(SystemExit, match="fine-tuned from"):
-        publish.main(["--base", base, "--chat", chat, "--bundle-weights"])
+        publish.main(["--base", base, "--chat", chat, "--user", "zuu007"])
 
 
-def test_space_requirements_leave_gradio_to_the_sdk_version():
-    requirements, gradio = publish.app_requirements()
-    assert gradio and "gradio" not in requirements.lower()
-    assert "torch==" in requirements
+def test_the_page_must_load_the_repos_being_published(exports, hub):
+    with pytest.raises(SystemExit, match="app.js does not load"):
+        publish.main(exports + ["--user", "someone-else"])

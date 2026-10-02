@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GPT-2 (124M) from scratch</title>
+  <meta name="description" content="Chat with a GPT-2 (124M) model trained from scratch on a single laptop GPU. Runs entirely in your browser.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232a63c7'/%3E%3Ctext x='16' y='22' font-family='Arial' font-size='15' font-weight='700' fill='white' text-anchor='middle'%3EG2%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>GPT-2 (124M), trained from scratch</h1>
+      <p class="lede">
+        A PyTorch reproduction of GPT-2 small, pretrained on 2.5 billion tokens of
+        FineWeb-Edu on a single 6GB laptop GPU, then fine-tuned for chat. The model runs
+        entirely in your browser: nothing you type leaves this page.
+      </p>
+      <p class="links">
+        <a href="https://github.com/zuurashad/gpt2-from-scratch">Code &amp; write-up on GitHub</a>
+        · <a href="https://huggingface.co/zuu007/gpt2-from-scratch">Model weights</a>
+      </p>
+    </header>
+
+    <nav class="tabs" role="tablist">
+      <button role="tab" id="tab-chat" aria-selected="true" aria-controls="panel-chat">Chat</button>
+      <button role="tab" id="tab-complete" aria-selected="false" aria-controls="panel-complete">Complete text (base model)</button>
+    </nav>
+
+    <section id="panel-chat" role="tabpanel" aria-labelledby="tab-chat">
+      <div id="chat-log" class="log" aria-live="polite">
+        <p class="placeholder">Ask something short. Try one of these:</p>
+        <div class="examples">
+          <button class="example">Explain what a neural network is in two sentences.</button>
+          <button class="example">Give me three tips for staying focused while studying.</button>
+          <button class="example">What is the difference between weather and climate?</button>
+          <button class="example">Write a short poem about the sea.</button>
+        </div>
+      </div>
+      <form id="chat-form" class="composer">
+        <textarea id="chat-input" rows="2" maxlength="4000" placeholder="Message the 124M model…" aria-label="Message"></textarea>
+        <div class="buttons">
+          <button type="submit" id="chat-send" class="primary">Send</button>
+          <button type="button" id="chat-stop" disabled>Stop</button>
+          <button type="button" id="chat-clear">Clear</button>
+        </div>
+      </form>
+    </section>
+
+    <section id="panel-complete" role="tabpanel" aria-labelledby="tab-complete" hidden>
+      <p class="hint">The pretrained model before any fine-tuning: give it the start of a passage and it continues it.</p>
+      <textarea id="complete-input" rows="3" maxlength="4000" aria-label="Prompt">Photosynthesis is the process by which</textarea>
+      <div class="buttons">
+        <button type="button" id="complete-go" class="primary">Generate</button>
+        <button type="button" id="complete-stop" disabled>Stop</button>
+      </div>
+      <div id="complete-output" class="output" aria-live="polite"></div>
+    </section>
+
+    <details class="settings">
+      <summary>Generation settings</summary>
+      <label>Temperature <output id="temperature-v">0.7</output>
+        <input type="range" id="temperature" min="0" max="1.5" step="0.05" value="0.7"></label>
+      <label>Top-p <output id="top_p-v">0.95</output>
+        <input type="range" id="top_p" min="0.1" max="1" step="0.05" value="0.95"></label>
+      <label>Top-k <output id="top_k-v">50</output>
+        <input type="range" id="top_k" min="0" max="200" step="1" value="50"></label>
+      <label>Repetition penalty <output id="repetition_penalty-v">1.1</output>
+        <input type="range" id="repetition_penalty" min="1" max="2" step="0.05" value="1.1"></label>
+      <label>Max new tokens <output id="max_new_tokens-v">192</output>
+        <input type="range" id="max_new_tokens" min="16" max="512" step="16" value="192"></label>
+    </details>
+
+    <p id="status" class="status" role="status">Loading…</p>
+
+    <footer>
+      <strong>What to expect.</strong> 124M parameters is GPT-2 <em>small</em>. It writes fluent
+      English but is often confidently wrong, especially about facts, numbers and anything
+      recent. The first visit downloads the model (about 125MB per tab); after that it is
+      cached by your browser. Please don't rely on what it says.
+    </footer>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
