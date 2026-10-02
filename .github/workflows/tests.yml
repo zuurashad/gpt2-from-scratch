@@ -39,21 +39,23 @@ jobs:
       # reference implementation (also covers the KV cache and gradient checkpointing)
       - run: python test_hf_equivalence.py
 
-  browser-template:
-    name: browser chat template matches chat.py
+  browser:
+    name: in-browser demo (template, sampling, ONNX export, page)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Install CPU PyTorch, tiktoken and Playwright's Chromium
+      - name: Install CPU PyTorch, the export environment and Playwright's Chromium
         run: |
           pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
-          pip install numpy==2.5.3 tiktoken==0.14.0 safetensors==0.8.0 pytest==9.1.1 \
-                      playwright==1.63.0
+          pip install -r requirements-web.txt pytest==9.1.1 playwright==1.63.0
           python -m playwright install --with-deps chromium
-      # runs web/template.js in headless Chromium and compares its prompt token ids
-      # with chat.build_chat_ids
-      - run: pytest -q tests/test_web_template.py
+      # the page's JavaScript in headless Chromium: prompt ids and sampling against
+      # chat.py, the int8 graph rewrite on a tiny exported model, and the page end to end
+      # (cache reuse, Stop, Clear, typed special tokens, unsupported browsers, ...)
+      - run: >-
+          pytest -q tests/test_web_template.py tests/test_web_sampling.py
+          tests/test_web_export.py tests/test_web_app.py
