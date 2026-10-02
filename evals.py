@@ -318,7 +318,9 @@ def main(argv=None):
         model = GPT.from_pretrained(args.model)
         label = args.model
     model.to(device)
-    torch.set_float32_matmul_precision("high")
+    # "highest" keeps --dtype fp32 truly fp32 (no TF32): GPT-2's large logits measurably
+    # lose accuracy at reduced precision, which would bias a GPT-2 comparison
+    torch.set_float32_matmul_precision("high" if autocast_dtype is not None else "highest")
 
     print(f"\nevaluating {label} on {device}\n" + "-" * 58)
     results = {}

@@ -87,7 +87,7 @@ def build_examples(dataset, split, enc, max_len, limit=None, system=SYSTEM_DEFAU
         raise SystemExit(f"no adapter for {dataset}; known: {', '.join(ADAPTERS)}")
 
     ds = load_dataset(dataset, split=split)
-    prefix_ids = enc.encode(B_SYS + system, allowed_special=set()) + [EOT_ID]
+    prefix_ids = enc.encode(B_SYS + system, allowed_special=set(), disallowed_special=()) + [EOT_ID]
 
     out, skipped = [], 0
     for i, row in enumerate(ds):
@@ -98,11 +98,11 @@ def build_examples(dataset, split, enc, max_len, limit=None, system=SYSTEM_DEFAU
             skipped += 1
             continue
         ctx_ids = (prefix_ids
-                   + enc.encode(B_USER + prompt, allowed_special=set()) + [EOT_ID]
-                   + enc.encode(B_ASSISTANT, allowed_special=set()))
+                   + enc.encode(B_USER + prompt, allowed_special=set(), disallowed_special=()) + [EOT_ID]
+                   + enc.encode(B_ASSISTANT, allowed_special=set(), disallowed_special=()))
         # the trailing EOT is INSIDE the supervised span: learning to emit it is what
         # lets the model end its own turn instead of rambling to the token limit
-        ans_ids = enc.encode(response, allowed_special=set()) + [EOT_ID]
+        ans_ids = enc.encode(response, allowed_special=set(), disallowed_special=()) + [EOT_ID]
         ids = ctx_ids + ans_ids
         if len(ids) > max_len:
             # truncating the response would teach the model to stop mid-sentence,
