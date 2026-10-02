@@ -18,3 +18,8 @@ __pycache__/
 .gradio/
 venv*/
 .venv/
+
+# browser/ONNX exports (export_hf.py, export_web.py): published to the Hub, never git
+*.onnx
+web-models/
+export-hf/

@@ -1,6 +1,10 @@
 """
 Benchmark: gradient checkpointing vs micro-batch size.
 
+SUPERSEDED by bench_throughput.py for the training configuration: this sweep times
+forward/backward before AdamW allocates its state, so its tokens/s for B=4 eager is
+higher than real training achieves (see README, "Fitting the training run into 6GB").
+
 The question this answers: the current run uses B=4 with no recomputation because
 that is what fits in 6GB. Gradient checkpointing throws away block activations and
 recomputes them in the backward pass, which costs roughly one extra forward (~30%

@@ -1,8 +1,8 @@
 """
-Web demo: the Hugging Face Space entry point, also runnable locally.
+Local chat demo: a Gradio server running this repo's own inference code (chat.py).
+The public demo is the in-browser page in web/; this is the server-side equivalent.
 
     python app.py --chat-model C:/ml/nanogpt/export/chat --base-model C:/ml/nanogpt/export/base
-    MODEL_REPO=<hf-user>/gpt2-from-scratch python app.py     # what the Space runs
 
 TWO TABS, BECAUSE THERE ARE TWO MODELS WORTH SHOWING
 The base model is the direct result of pretraining: a text continuer. The chat model
@@ -10,10 +10,9 @@ is the same network after supervised fine-tuning (sft.py) on instruction data. S
 both side by side shows what each stage actually contributes.
 
 CPU ONLY, ON PURPOSE
-A free Space has no GPU, and it doesn't need one: with the KV cache, 124M parameters
-decode at roughly 20 tokens/s on two CPU cores, which is fast enough to stream. The
-app never touches CUDA unless --device asks for it, so running it locally can't
-compete with a training run for the GPU.
+With the KV cache, 124M parameters decode at roughly 20 tokens/s on two CPU cores,
+which is fast enough to stream. The app never touches CUDA unless --device asks for
+it, so running it can't compete with a training run for the GPU.
 """
 
 from __future__ import annotations
@@ -129,25 +128,16 @@ class Models:
             yield text
 
 
-def resolve_sources(chat_model=None, base_model=None, model_repo=None):
-    """Explicit export folders win, then folders bundled next to this file (a private
-    Space carries its own weights), then one Hub repo holding chat/ and base/."""
+def resolve_sources(chat_model=None, base_model=None):
+    """Explicit export folders win, then export folders under models/ next to this file."""
     if chat_model or base_model:
         return chat_model, base_model
     bundled = [os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", sub)
                for sub in ("chat", "base")]
     if any(os.path.isdir(b) for b in bundled):
         return tuple(b if os.path.isdir(b) else None for b in bundled)
-    if model_repo:
-        from huggingface_hub import snapshot_download
-        root = snapshot_download(model_repo, allow_patterns=["base/*", "chat/*"])
-        found = lambda sub: os.path.join(root, sub) if os.path.isdir(os.path.join(root, sub)) else None
-        chat, base = found("chat"), found("base")
-        if not (chat or base):
-            raise SystemExit(f"{model_repo} has neither a chat/ nor a base/ export folder")
-        return chat, base
-    raise SystemExit("no model found: set MODEL_REPO (or CHAT_MODEL/BASE_MODEL), bundle "
-                     "export folders under models/, or pass --chat-model/--base-model")
+    raise SystemExit("no model found: pass --chat-model/--base-model (export.py folders), "
+                     "set CHAT_MODEL/BASE_MODEL, or put export folders under models/")
 
 
 def load(path, device):
@@ -257,8 +247,6 @@ def main(argv=None):
                    help="export.py folder of the SFT model (env CHAT_MODEL)")
     p.add_argument("--base-model", default=os.environ.get("BASE_MODEL"),
                    help="export.py folder of the base model (env BASE_MODEL)")
-    p.add_argument("--model-repo", default=os.environ.get("MODEL_REPO"),
-                   help="Hub repo holding chat/ and base/ export folders (env MODEL_REPO)")
     p.add_argument("--device", default="cpu", help="cpu (default) or cuda")
     p.add_argument("--dtype", default="auto", choices=["auto", "bf16", "fp16", "fp32"])
     # a Space container often reports the HOST's core count, and one torch thread per
@@ -271,7 +259,7 @@ def main(argv=None):
 
     if args.threads:
         torch.set_num_threads(int(args.threads))
-    chat_dir, base_dir = resolve_sources(args.chat_model, args.base_model, args.model_repo)
+    chat_dir, base_dir = resolve_sources(args.chat_model, args.base_model)
     print(f"models: chat={chat_dir} base={base_dir}; {torch.get_num_threads()} CPU threads",
           file=sys.stderr)
     models = Models(chat=load(chat_dir, args.device), base=load(base_dir, args.device),
