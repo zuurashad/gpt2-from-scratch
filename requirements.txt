@@ -1,10 +1,13 @@
-# Training, fine-tuning and evaluation (the versions this project was run with).
+# Training, fine-tuning and evaluation (Python 3.12; the versions this project ran with).
 # Install PyTorch for your CUDA version first, e.g.
 #   pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 torch==2.6.0
 numpy==2.5.2
 tiktoken==0.14.0
-datasets==5.0.1         # fineweb.py, sft.py, evals.py
-transformers==5.16.1    # GPT.from_pretrained and test_hf_equivalence.py only
+datasets==5.0.1         # fineweb.py, sft.py, evals.py, hellaswag.py
+transformers==5.16.1    # GPT.from_pretrained, test_hf_equivalence.py, archive/train_gpt2.py
 tqdm==4.70.0            # fineweb.py
 safetensors==0.8.0      # export.py and loading exported models
+matplotlib==3.11.2      # plot_training.py
+pytest==9.1.1           # tests/
+huggingface_hub==1.33.0 # publish.py
