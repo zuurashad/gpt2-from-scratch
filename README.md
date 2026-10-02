@@ -5,8 +5,8 @@ initialisation) on 2.5 billion tokens of FineWeb-Edu on a single 6GB laptop GPU,
 fine-tuned into a chatbot and deployed as a free CPU web demo. With OpenAI's released
 weights loaded, the implementation reproduces the reference GPT-2's logits to within 7e-5.
 
-**[Try the live demo](https://huggingface.co/spaces/HF_USER/gpt2-from-scratch)** ·
-[model weights](https://huggingface.co/HF_USER/gpt2-from-scratch) ·
+**[Try the live demo](https://huggingface.co/spaces/zuu007/gpt2-from-scratch)** ·
+[model weights](https://huggingface.co/zuu007/gpt2-from-scratch) ·
 [![tests](https://github.com/zuurashad/gpt2-from-scratch/actions/workflows/tests.yml/badge.svg)](https://github.com/zuurashad/gpt2-from-scratch/actions/workflows/tests.yml)
 
 <!-- RESULTS:START -->
