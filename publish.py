@@ -3,9 +3,11 @@ Publish the exported models and the demo to the Hugging Face Hub.
 
     hf auth login                     # once, with a token that has write access
     python publish.py --base C:/ml/nanogpt/export/base --chat C:/ml/nanogpt/export/chat \
-                      --evals evals_ours.json --baseline evals_gpt2.json
-    python publish.py ... --private --bundle-weights    # a private trial of the Space
+                      --bundle-weights                  # a private trial of the Space
+    python publish.py ... --evals evals_ours.json --baseline evals_gpt2.json --public
     python publish.py ... --dry-run                     # assemble and list, upload nothing
+
+Repos are created private, and stay private, unless --public is given.
 
 Two repos share one name, <user>/gpt2-from-scratch:
   model  base/ and chat/ export folders (safetensors + config.json) plus a model card
@@ -113,7 +115,7 @@ def assemble_space(stage, model_id, bundle, base_dir, chat_dir):
         shutil.copytree(chat_dir, os.path.join(stage, "models", "chat"))
 
 
-def main(argv=None):
+def build_parser():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--base", required=True, help="export.py folder of the base model")
@@ -122,11 +124,21 @@ def main(argv=None):
     p.add_argument("--user", default=None, help="Hub namespace (default: the logged-in user)")
     p.add_argument("--evals", default=None, help="evals.py --out JSON for the base model")
     p.add_argument("--baseline", default=None, help="evals.py --out JSON for OpenAI gpt2")
-    p.add_argument("--private", action="store_true", help="create/keep the repos private")
+    # private unless asked: an accidental run must never publish, or flip a private
+    # repo to public
+    p.add_argument("--public", action="store_true",
+                   help="make the repos public (default: create/keep them private)")
     p.add_argument("--bundle-weights", action="store_true",
                    help="put the weights inside the Space instead of a model repo")
     p.add_argument("--dry-run", action="store_true")
-    args = p.parse_args(argv)
+    return p
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    if not args.public and not args.bundle_weights:
+        raise SystemExit("a private deploy needs --bundle-weights: the Hub cannot preload "
+                         "a Space's weights from a private model repo")
 
     from huggingface_hub import HfApi
     api = HfApi()
@@ -151,7 +163,8 @@ def main(argv=None):
                 print(f"model: base/, chat/ and README.md ->\n{card}")
             return 0
 
-        visibility = dict(private=args.private)
+        visibility = dict(private=not args.public)
+        print(f"visibility: {'PUBLIC' if args.public else 'private'}", file=sys.stderr)
         if not args.bundle_weights:
             api.create_repo(model_id, repo_type="model", exist_ok=True, **visibility)
             api.update_repo_settings(model_id, repo_type="model", **visibility)

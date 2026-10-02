@@ -1,12 +1,12 @@
 MIT License
 
+This project is released under the MIT License below. The notice covers both copyright
+holders: Zuhair Rashad for this project as a whole, and Andrej Karpathy for the code
+derived from build-nanogpt (https://github.com/karpathy/build-nanogpt, MIT). That code
+is the GPT-2 model and training loop in train_gpt2_refined.py and archive/train_gpt2.py,
+and the data and evaluation scripts fineweb.py and hellaswag.py.
+
 Copyright (c) 2026 Zuhair Rashad
-
-Portions of this project (the GPT-2 model and training loop in train_gpt2_refined.py
-and archive/train_gpt2.py, and the data/eval scripts fineweb.py and hellaswag.py) are
-derived from Andrej Karpathy's build-nanogpt (https://github.com/karpathy/build-nanogpt),
-which is released under the MIT License:
-
 Copyright (c) 2024 Andrej Karpathy
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
