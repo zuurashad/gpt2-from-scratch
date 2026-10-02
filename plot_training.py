@@ -1,14 +1,16 @@
 """
 Training curves for the README: loss and HellaSwag against tokens seen.
 
-    python plot_training.py C:/ml/nanogpt/log/metrics.jsonl \
-        --gpt2-val-loss 3.2924 --gpt2-hellaswag 0.2955
+    python plot_training.py results/metrics.jsonl --gpt2-val-loss 3.2424 --gpt2-hellaswag 0.336
+
+(results/metrics.jsonl is a copy of the run's log: never plot a live log in place.)
 
 Writes assets/training_light.png and assets/training_dark.png (the README shows the
 one matching the viewer's GitHub theme). The OpenAI GPT-2 reference lines are measured
 rather than quoted: val_loss.py scores OpenAI's checkpoint on the same 409,600
 validation tokens, and hellaswag.py on the same first 1,000 HellaSwag examples the
-training run tracks.
+training run tracks. Both baselines are scored in fp32: bf16 scoring inflates OpenAI's
+loss by ~0.02 nats (its logits are large), while ours barely moves.
 """
 
 from __future__ import annotations
@@ -30,11 +32,17 @@ def read_metrics(path):
     so the last record for each (event, step) wins."""
     series, tokens_per_step = {}, 524288
     with open(path, encoding="utf-8") as f:
-        for line in f:
+        lines = f.read().splitlines()
+    for i, line in enumerate(lines):
+        try:
             r = json.loads(line)
-            if r["event"] == "run_start":
-                tokens_per_step = r.get("args", {}).get("total_batch_size", tokens_per_step)
-            series.setdefault(r["event"], {})[r["step"]] = r
+        except json.JSONDecodeError:
+            if i == len(lines) - 1:     # the last line was mid-write when the file was copied
+                break
+            raise
+        if r["event"] == "run_start":
+            tokens_per_step = r.get("args", {}).get("total_batch_size", tokens_per_step)
+        series.setdefault(r["event"], {})[r["step"]] = r
     return series, tokens_per_step
 
 
@@ -87,7 +95,7 @@ def plot(series, tokens_per_step, gpt2_val, gpt2_hella, theme, out_path):
     ax_loss.plot(billions([s for s, _ in val]), [r["loss"] for _, r in val],
                  color=c["ours"], linewidth=2.0, marker="o", markersize=4,
                  label="validation loss")
-    floor = min([r["loss"] for _, r in val] + ([gpt2_val] if gpt2_val else []))
+    floor = min([r["loss"] for _, r in val] + ([gpt2_val] if gpt2_val else []) + [5.0])
     ax_loss.set_ylim(floor - 0.15, 5.5)
     if gpt2_val:
         ax_loss.axhline(gpt2_val, color=c["muted"], linewidth=1.5, linestyle=(0, (5, 3)))
@@ -139,9 +147,12 @@ def main(argv=None):
     p.add_argument("--gpt2-val-loss", type=float, default=None)
     p.add_argument("--gpt2-hellaswag", type=float, default=None,
                    help="OpenAI GPT-2's acc_norm on the same HellaSwag examples")
-    p.add_argument("--out-dir", default="assets")
+    p.add_argument("--out-dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                     "assets"))
     args = p.parse_args(argv)
 
+    if os.path.exists(os.path.join(os.path.dirname(os.path.abspath(args.metrics)), "watchdog.log")):
+        raise SystemExit("that is a live training log directory: copy metrics.jsonl out first")
     series, tokens_per_step = read_metrics(args.metrics)
     os.makedirs(args.out_dir, exist_ok=True)
     for theme in THEMES:

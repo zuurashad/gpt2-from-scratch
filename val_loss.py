@@ -40,7 +40,7 @@ def main(argv=None):
     torch.set_grad_enabled(False)
     model = load_model(args.checkpoint, args.model or "gpt2", args.device).eval()
     shard = sorted(s for s in os.listdir(args.data_dir) if "val" in s)[0]
-    tokens = np.load(os.path.join(args.data_dir, shard))
+    tokens = np.load(os.path.join(args.data_dir, shard), mmap_mode="r")   # a 200MB shard
     T = args.seq_len
     assert len(tokens) > args.rows * T, "validation shard too short for --rows"
 
