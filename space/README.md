@@ -11,6 +11,12 @@ short_description: GPT-2 small trained from scratch, running in your browser
 models:
   - {{BASE_REPO}}
   - {{CHAT_REPO}}
+# cross-origin isolation lets ONNX Runtime use several CPU threads (SharedArrayBuffer)
+# when the page is opened directly; inside the Hub's frame it runs single-threaded
+custom_headers:
+  cross-origin-embedder-policy: require-corp
+  cross-origin-opener-policy: same-origin
+  cross-origin-resource-policy: cross-origin
 ---
 
 # GPT-2 (124M), trained from scratch

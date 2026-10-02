@@ -64,6 +64,18 @@ def hub(monkeypatch):
     return calls
 
 
+def test_the_space_gets_every_module_the_page_imports():
+    import re
+    web = os.path.join(os.path.dirname(publish.__file__), "web")
+    for name in [f for f in publish.WEB_FILES if f.endswith(".js")] + ["index.html"]:
+        with open(os.path.join(web, name), encoding="utf-8") as f:
+            text = f.read()
+        local = set(re.findall(r"""(?:from|import)\s*\(?\s*["']\./([\w.-]+)["']""", text))
+        local |= set(re.findall(r"""(?:src|href)=["']([\w.-]+\.(?:js|css))["']""", text))
+        assert local <= set(publish.WEB_FILES), (name, local - set(publish.WEB_FILES))
+    assert {"index.html", "app.js", "template.js", "sampling.js", "style.css"} <= set(publish.WEB_FILES)
+
+
 def test_repos_are_private_unless_public_is_asked_for():
     args = publish.build_parser().parse_args(["--base", "b", "--chat", "c"])
     assert args.public is False

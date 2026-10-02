@@ -35,7 +35,8 @@ NAME = "gpt2-from-scratch"
 MODEL_FILES = ["config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json",
                "vocab.json", "merges.txt", "model.safetensors", "onnx/model_quantized.onnx",
                "training.json", "quantisation.json"]
-WEB_FILES = ["index.html", "app.js", "template.js", "style.css"]
+# every page asset in web/, so a new module can never be left off the Space
+WEB_FILES = sorted(f for f in os.listdir(os.path.join(HERE, "web")) if f.endswith((".html", ".js", ".css")))
 
 
 def read(path):
