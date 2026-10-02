@@ -27,13 +27,15 @@ Each folder holds `model.safetensors` and `config.json`.
 
 The architecture is exactly GPT-2 small: 12 layers, 12 heads, width 768, 1024-token
 context and the GPT-2 BPE tokenizer. The token embedding (tied to the output head) is
-padded from 50,257 to 50,304 rows for tensor-core-friendly shapes. The padding rows are
-never sampled.
+padded from 50,257 to 50,304 rows for tensor-core-friendly shapes. The padding rows
+have no tokenizer entry, and the repo's sampler masks them out. Mask them in any
+other decoder too.
 
 ## Evaluation
 
-Zero-shot, scored by comparing the model's likelihood of each answer choice (the GPT-2
-and GPT-3 protocol). The baseline is OpenAI's GPT-2 124M, run through the same harness.
+Zero-shot, in fp32, scored by per-choice log-likelihood (`acc`, and length-normalised
+`acc_norm` as in lm-evaluation-harness). The baseline is OpenAI's GPT-2 124M, run
+through the same harness.
 
 {{EVAL_TABLE}}
 
@@ -58,6 +60,8 @@ produce incorrect or inappropriate text. It is a learning project, not a product
 
 - Pretraining: [FineWeb-Edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu)
   (ODC-By 1.0)
-- Fine-tuning: [{{SFT_DATASET}}](https://huggingface.co/datasets/{{SFT_DATASET}})
+- Fine-tuning: [{{SFT_DATASET}}](https://huggingface.co/datasets/{{SFT_DATASET}}),
+  licensed CC BY-SA 3.0. The `chat/` weights are an adaptation of it, so treat them as
+  share-alike.
 - Code: MIT, derived in part from Andrej Karpathy's
   [build-nanogpt](https://github.com/karpathy/build-nanogpt) (MIT)

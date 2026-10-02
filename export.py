@@ -47,11 +47,18 @@ def portable_args(args):
     """
     out = {}
     for k, v in (args or {}).items():
-        if isinstance(v, str) and (os.path.isabs(v) or ":" in v or "\\" in v):
+        if k in PATH_ARGS or k.endswith("_dir"):
+            continue
+        if isinstance(v, str) and (os.path.isabs(v) or v.startswith(("/", "~", "."))
+                                   or ":" in v or "\\" in v):
             continue
         if v is None or isinstance(v, (str, int, float, bool)):
             out[k] = v
     return out
+
+
+# arguments that hold filesystem paths in train_gpt2_refined.py / sft.py
+PATH_ARGS = {"init", "resume", "checkpoint", "data_dir", "log_dir", "out_dir"}
 
 
 def load_checkpoint(path):
@@ -104,23 +111,27 @@ def export(checkpoint, out_dir, dtype_name="fp32"):
     model, ckpt = load_checkpoint(checkpoint)
     state = model.state_dict()
     wte = "transformer.wte.weight"
-    assert state[TIED_KEY].data_ptr() == state[wte].data_ptr(), "expected lm_head tied to wte"
+    if state[TIED_KEY].data_ptr() != state[wte].data_ptr():
+        raise SystemExit("expected lm_head.weight to be tied to transformer.wte.weight")
     tensors = {k: v.detach().to(DTYPES[dtype_name]).contiguous()
                for k, v in state.items() if k != TIED_KEY}
 
     os.makedirs(out_dir, exist_ok=True)
     weights = os.path.join(out_dir, "model.safetensors")
+    config = os.path.join(out_dir, "config.json")
     save_file(tensors, weights, metadata={"format": "pt"})
     meta = build_meta(model, ckpt, checkpoint, dtype_name)
-    with open(os.path.join(out_dir, "config.json"), "w", encoding="utf-8") as f:
+    with open(config, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
         f.write("\n")
     del tensors, ckpt
 
     reloaded, _ = load_exported(out_dir)
     diff = max_logit_diff(model, reloaded.eval(), min(model.config.vocab_size, 50257))
-    if dtype_name == "fp32" and diff != 0.0:
-        raise SystemExit(f"round trip is not exact: max |logit diff| {diff:.3e}")
+    if (dtype_name == "fp32" and diff != 0.0) or diff != diff:     # diff != diff: NaN
+        for path in (weights, config):      # never leave a bad export lying around
+            os.remove(path)
+        raise SystemExit(f"round trip failed: max |logit diff| {diff:.3e}; export removed")
     size_mb = os.path.getsize(weights) / 2**20
     print(f"wrote {weights} ({size_mb:.0f} MiB, {meta['parameters']:,} params, {dtype_name}); "
           f"round-trip max |logit diff| {diff:.3e}", file=sys.stderr)

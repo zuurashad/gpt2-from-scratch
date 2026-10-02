@@ -15,6 +15,14 @@ Two repos share one name, <user>/gpt2-from-scratch:
          visitor never waits for a download.
 The Hub can only preload from a PUBLIC model repo. A private trial therefore bundles
 the weights into the Space itself (--bundle-weights) and skips the model repo.
+
+ORDER OF A PUBLIC RELEASE
+Everything is uploaded while private, and each repo only turns public once it is
+complete (weights, card, licence), so a failure half way never leaves a public repo
+without its README or attribution. The model repo goes public before the Space is
+uploaded, because the Space's build preloads from it. The Space's history is squashed
+before it goes public, so weights bundled during a private trial don't stay
+downloadable from old commits.
 """
 
 from __future__ import annotations
@@ -28,7 +36,10 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_URL = "https://github.com/zuurashad/gpt2-from-scratch"
-SPACE_CODE = ["app.py", "chat.py", "train_gpt2_refined.py"]
+# LICENSE travels with the code: train_gpt2_refined.py derives from MIT-licensed
+# build-nanogpt, and MIT requires the notice in every copy
+SPACE_CODE = ["app.py", "chat.py", "train_gpt2_refined.py", "LICENSE"]
+EXPORT_FILES = ["config.json", "model.safetensors"]
 
 
 def read(path):
@@ -39,7 +50,8 @@ def read(path):
 def fill(template, values):
     for key, value in values.items():
         template = template.replace("{{" + key + "}}", str(value))
-    assert "{{" not in template, "unfilled placeholder in template"
+    if "{{" in template:
+        raise SystemExit("unfilled placeholder in template")
     return template
 
 
@@ -60,7 +72,12 @@ def app_requirements():
 def eval_table(ours_path, baseline_path):
     if not ours_path:
         return "_Not yet evaluated._"
-    load = lambda p: json.load(open(p, encoding="utf-8"))["results"] if p else {}
+
+    def load(path):
+        if not path:
+            return {}
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)["results"]
     ours, base = load(ours_path), load(baseline_path)
 
     def cell(r, key):
@@ -86,14 +103,25 @@ def model_card(base_meta, chat_meta, model_id, space_id, evals, baseline):
     tokens = "?"
     if base_meta.get("step") is not None and args.get("total_batch_size"):
         tokens = f"{(base_meta['step'] + 1) * args['total_batch_size'] / 1e9:.1f}B"
+    val = base_meta.get("val_loss")
+    dataset = (chat_meta.get("train_args") or {}).get("dataset")
+    if not dataset:
+        raise SystemExit("the chat export's config.json names no SFT dataset")
     return fill(read("space/MODEL_CARD.md"), {
         "REPO_URL": REPO_URL, "REPO_NAME": REPO_URL.rsplit("/", 1)[1],
         "REPO_DISPLAY": REPO_URL.removeprefix("https://"),
         "SPACE_URL": f"https://huggingface.co/spaces/{space_id}", "MODEL_REPO": model_id,
-        "TOKENS": tokens, "BASE_VAL_LOSS": f"{base_meta.get('val_loss', float('nan')):.4f}",
-        "SFT_DATASET": (chat_meta.get("train_args") or {}).get("dataset", "?"),
-        "EVAL_TABLE": eval_table(evals, baseline),
+        "TOKENS": tokens, "BASE_VAL_LOSS": "n/a" if val is None else f"{val:.4f}",
+        "SFT_DATASET": dataset, "EVAL_TABLE": eval_table(evals, baseline),
     })
+
+
+def copy_export(src, dst):
+    """Copy only the two files an export consists of, never whatever else sits in the
+    folder (a .pt pickle, logs with local paths)."""
+    os.makedirs(dst, exist_ok=True)
+    for name in EXPORT_FILES:
+        shutil.copy2(os.path.join(src, name), dst)
 
 
 def assemble_space(stage, model_id, bundle, base_dir, chat_dir):
@@ -111,8 +139,23 @@ def assemble_space(stage, model_id, bundle, base_dir, chat_dir):
     with open(os.path.join(stage, "README.md"), "w", encoding="utf-8") as f:
         f.write(readme)
     if bundle:   # app.py picks these up from models/ next to itself
-        shutil.copytree(base_dir, os.path.join(stage, "models", "base"))
-        shutil.copytree(chat_dir, os.path.join(stage, "models", "chat"))
+        copy_export(base_dir, os.path.join(stage, "models", "base"))
+        copy_export(chat_dir, os.path.join(stage, "models", "chat"))
+
+
+def load_meta(folder):
+    with open(os.path.join(folder, "config.json"), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def check_pair(base_meta, chat_meta):
+    """The card says chat/ is base/ after fine-tuning; make sure that is true."""
+    if base_meta.get("stage") != "base" or chat_meta.get("stage") != "sft":
+        raise SystemExit(f"--base/--chat stages are {base_meta.get('stage')!r}/"
+                         f"{chat_meta.get('stage')!r}; expected 'base'/'sft'")
+    if chat_meta.get("base_checkpoint") != base_meta.get("source_checkpoint"):
+        raise SystemExit(f"the chat model was fine-tuned from {chat_meta.get('base_checkpoint')}, "
+                         f"but --base was exported from {base_meta.get('source_checkpoint')}")
 
 
 def build_parser():
@@ -136,20 +179,16 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    if not args.public and not args.bundle_weights:
+    if not args.public and not args.bundle_weights and not args.dry_run:
         raise SystemExit("a private deploy needs --bundle-weights: the Hub cannot preload "
                          "a Space's weights from a private model repo")
+    base_meta, chat_meta = load_meta(args.base), load_meta(args.chat)
+    check_pair(base_meta, chat_meta)
 
     from huggingface_hub import HfApi
     api = HfApi()
     user = args.user or ("<user>" if args.dry_run else api.whoami()["name"])
     model_id = space_id = f"{user}/{args.name}"
-    def meta(folder):
-        with open(os.path.join(folder, "config.json"), encoding="utf-8") as f:
-            return json.load(f)
-    base_meta, chat_meta = meta(args.base), meta(args.chat)
-    assert base_meta.get("stage") == "base" and chat_meta.get("stage") == "sft", \
-        f"--base/--chat look swapped: stages {base_meta.get('stage')}, {chat_meta.get('stage')}"
 
     with tempfile.TemporaryDirectory() as stage:
         assemble_space(stage, model_id, args.bundle_weights, args.base, args.chat)
@@ -163,26 +202,33 @@ def main(argv=None):
                 print(f"model: base/, chat/ and README.md ->\n{card}")
             return 0
 
-        visibility = dict(private=not args.public)
         print(f"visibility: {'PUBLIC' if args.public else 'private'}", file=sys.stderr)
         if not args.bundle_weights:
-            api.create_repo(model_id, repo_type="model", exist_ok=True, **visibility)
-            api.update_repo_settings(model_id, repo_type="model", **visibility)
+            # complete the model repo while private, then (if asked) publish it, BEFORE
+            # the Space build that preloads from it
+            api.create_repo(model_id, repo_type="model", private=True, exist_ok=True)
             for sub, folder in (("base", args.base), ("chat", args.chat)):
                 api.upload_folder(repo_id=model_id, folder_path=folder, path_in_repo=sub,
+                                  allow_patterns=EXPORT_FILES,
                                   commit_message=f"upload {sub} model")
             api.upload_file(repo_id=model_id, path_or_fileobj=card.encode("utf-8"),
                             path_in_repo="README.md", commit_message="model card")
+            if args.public:
+                api.update_repo_settings(model_id, repo_type="model", private=False)
 
-        api.create_repo(space_id, repo_type="space", space_sdk="gradio", exist_ok=True,
-                        **visibility)
-        api.update_repo_settings(space_id, repo_type="space", **visibility)
+        api.create_repo(space_id, repo_type="space", space_sdk="gradio", private=True,
+                        exist_ok=True)
         if not args.bundle_weights:
             api.add_space_variable(space_id, "MODEL_REPO", model_id)
         api.upload_folder(repo_id=space_id, repo_type="space", folder_path=stage,
                           commit_message="deploy demo",
                           # weights live in the model repo unless bundled: clear old copies
                           delete_patterns=None if args.bundle_weights else ["models/**"])
+        if args.public:
+            # one commit of history, so a private trial's bundled weights are gone
+            api.super_squash_history(repo_id=space_id, repo_type="space",
+                                     commit_message="deploy demo")
+            api.update_repo_settings(space_id, repo_type="space", private=False)
 
     if not args.bundle_weights:
         print(f"model: https://huggingface.co/{model_id}")
