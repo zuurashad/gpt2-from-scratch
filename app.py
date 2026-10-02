@@ -24,11 +24,12 @@ import sys
 
 import torch
 
-from chat import (EOT_ID, SYSTEM_DEFAULT, build_chat_ids, generate_stream, load_exported,
-                  resolve_autocast_dtype)
+from chat import (EOT_ID, SYSTEM_DEFAULT, build_chat_ids, encode_text, generate_stream,
+                  load_exported, resolve_autocast_dtype)
 
 REPO_URL = "https://github.com/zuurashad/gpt2-from-scratch"
 MAX_INPUT_CHARS = 4000     # build_chat_ids trims to the context window; this just bounds the work
+EMPTY_TURN = "*(The model ended its turn without writing anything. Try again, or raise the temperature.)*"
 
 CHAT_EXAMPLES = [
     "Explain what a neural network is in two sentences.",
@@ -56,13 +57,21 @@ def message_text(content):
 
 
 def to_turns(history, message):
-    """Gradio's message dicts plus the new message -> chat.build_chat_ids' (role, text)."""
+    """Gradio's message dicts plus the new message -> chat.build_chat_ids' (role, text).
+
+    The app's own notices are not model output, so they are never fed back to it, and
+    consecutive same-role messages (left behind by an interrupted reply) are merged so
+    the model always sees strictly alternating turns.
+    """
     turns = []
-    for m in history or []:
-        role, text = m.get("role"), message_text(m.get("content")).strip()
-        if role in ("user", "assistant") and text:
+    for m in list(history or []) + [{"role": "user", "content": message}]:
+        role, text = m.get("role"), message_text(m.get("content")).strip()[:MAX_INPUT_CHARS]
+        if role not in ("user", "assistant") or not text or text == EMPTY_TURN:
+            continue
+        if turns and turns[-1][0] == role:
+            turns[-1] = (role, turns[-1][1] + "\n\n" + text)
+        else:
             turns.append((role, text))
-    turns.append(("user", message_text(message)[:MAX_INPUT_CHARS]))
     return turns
 
 
@@ -79,9 +88,12 @@ class Models:
 
     def _stream(self, model, ids, temperature, top_p, top_k, repetition_penalty,
                 max_new_tokens):
+        temperature = float(temperature)
+        if temperature < 1e-3:      # dividing logits by ~0 overflows; treat it as greedy
+            temperature = 0.0
         return generate_stream(model, self.enc, ids, self.device,
                                max_new_tokens=int(max_new_tokens),
-                               temperature=float(temperature), top_k=int(top_k),
+                               temperature=temperature, top_k=int(top_k),
                                top_p=float(top_p),
                                repetition_penalty=float(repetition_penalty),
                                autocast_dtype=self.autocast_dtype, stop_ids={EOT_ID})
@@ -89,6 +101,9 @@ class Models:
     def chat(self, message, history, temperature, top_p, top_k, repetition_penalty,
              max_new_tokens):
         model = self.chat_model
+        if not message_text(message).strip():
+            yield "*(Type a message first.)*"
+            return
         ids = build_chat_ids(to_turns(history, message), self.enc, SYSTEM_DEFAULT,
                              max_tokens=model.config.block_size - int(max_new_tokens))
         text = ""
@@ -97,7 +112,7 @@ class Models:
             text += piece
             yield text
         if not text.strip():
-            yield "*(The model ended its turn without writing anything. Try again, or raise the temperature.)*"
+            yield EMPTY_TURN
 
     def complete(self, prompt, temperature, top_p, top_k, repetition_penalty,
                  max_new_tokens):
@@ -105,7 +120,7 @@ class Models:
         if not prompt.strip():
             yield ""
             return
-        ids = self.enc.encode(prompt, allowed_special=set())
+        ids = encode_text(self.enc, prompt)
         ids = ids[-(self.base_model.config.block_size - int(max_new_tokens)):]
         text = prompt
         for piece in self._stream(self.base_model, ids, temperature, top_p, top_k,
@@ -127,8 +142,12 @@ def resolve_sources(chat_model=None, base_model=None, model_repo=None):
         from huggingface_hub import snapshot_download
         root = snapshot_download(model_repo, allow_patterns=["base/*", "chat/*"])
         found = lambda sub: os.path.join(root, sub) if os.path.isdir(os.path.join(root, sub)) else None
-        return found("chat"), found("base")
-    raise SystemExit("no model given: pass --chat-model/--base-model, or set MODEL_REPO")
+        chat, base = found("chat"), found("base")
+        if not (chat or base):
+            raise SystemExit(f"{model_repo} has neither a chat/ nor a base/ export folder")
+        return chat, base
+    raise SystemExit("no model found: set MODEL_REPO (or CHAT_MODEL/BASE_MODEL), bundle "
+                     "export folders under models/, or pass --chat-model/--base-model")
 
 
 def load(path, device):
@@ -194,13 +213,16 @@ def build_ui(models):
         gr.Markdown(header_markdown(models))
         if models.chat_model is not None:
             with gr.Tab("Chat"):
-                gr.ChatInterface(
+                # kept on the Blocks so tests can inspect it: Gradio shows the stop
+                # button only while a reply streams, so the setting lives here
+                ui.chat_interface = gr.ChatInterface(
                     models.chat,
                     chatbot=gr.Chatbot(height=460, placeholder="Ask me something short."),
                     textbox=gr.Textbox(placeholder="Message the 124M model…",
-                                       max_length=MAX_INPUT_CHARS, submit_btn=True),
-                    additional_inputs=sampling_controls(gr, 0.7, 200),
-                    additional_inputs_accordion="Generation settings",
+                                       max_length=MAX_INPUT_CHARS, submit_btn=True,
+                                       stop_btn=True),
+                    additional_inputs=sampling_controls(gr, 0.7, 192),
+                    additional_inputs_accordion=gr.Accordion("Generation settings", open=False),
                     examples=[[e] for e in CHAT_EXAMPLES],
                     # generate fresh every time: a cached answer would hide what the
                     # model actually does (and caching runs every example at startup)
@@ -239,14 +261,19 @@ def main(argv=None):
                    help="Hub repo holding chat/ and base/ export folders (env MODEL_REPO)")
     p.add_argument("--device", default="cpu", help="cpu (default) or cuda")
     p.add_argument("--dtype", default="auto", choices=["auto", "bf16", "fp16", "fp32"])
-    p.add_argument("--threads", type=int, default=None, help="torch CPU threads")
+    # a Space container often reports the HOST's core count, and one torch thread per
+    # host core on 2 vCPUs is oversubscription; so on a Space default to 2
+    default_threads = os.environ.get("TORCH_THREADS") or ("2" if os.environ.get("SPACE_ID") else None)
+    p.add_argument("--threads", type=int, default=default_threads,
+                   help="torch CPU threads (env TORCH_THREADS; 2 on a Space)")
     p.add_argument("--port", type=int, default=None)
     args = p.parse_args(argv)
 
     if args.threads:
-        torch.set_num_threads(args.threads)
-    torch.set_grad_enabled(False)
+        torch.set_num_threads(int(args.threads))
     chat_dir, base_dir = resolve_sources(args.chat_model, args.base_model, args.model_repo)
+    print(f"models: chat={chat_dir} base={base_dir}; {torch.get_num_threads()} CPU threads",
+          file=sys.stderr)
     models = Models(chat=load(chat_dir, args.device), base=load(base_dir, args.device),
                     device=args.device, dtype=args.dtype)
 
@@ -254,7 +281,7 @@ def main(argv=None):
     ui = build_ui(models)
     # one generation at a time per tab: on two shared cores, parallel requests would
     # only make every reply slower
-    ui.queue(default_concurrency_limit=1, max_size=32)
+    ui.queue(default_concurrency_limit=1, max_size=12)
     ui.launch(server_port=args.port, theme=gr.themes.Soft())
     return 0
 

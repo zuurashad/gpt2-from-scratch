@@ -65,12 +65,13 @@ def build_chat_ids(history, enc, system=SYSTEM_DEFAULT, max_tokens=None):
     prompt. Cutting raw tokens off the front instead deletes the system prompt and
     can start the model reading mid-turn, a format it never saw during fine-tuning.
     """
-    prefix = enc.encode(B_SYS + system, allowed_special=set()) + [EOT_ID]
-    turns = []
-    for role, text in history:
-        head = B_USER if role == "user" else B_ASSISTANT
-        turns.append(enc.encode(head + text, allowed_special=set()) + [EOT_ID])
-    tail = enc.encode(B_ASSISTANT, allowed_special=set())   # model continues from here
+    heads = {"user": B_USER, "assistant": B_ASSISTANT}
+    for role, _ in history:
+        if role not in heads:
+            raise ValueError(f"unknown role {role!r}; expected 'user' or 'assistant'")
+    prefix = encode_text(enc, B_SYS + system) + [EOT_ID]
+    turns = [encode_text(enc, heads[role] + text) + [EOT_ID] for role, text in history]
+    tail = encode_text(enc, B_ASSISTANT)   # model continues from here
 
     if max_tokens is not None:
         budget = max_tokens - len(prefix) - len(tail)
@@ -78,24 +79,39 @@ def build_chat_ids(history, enc, system=SYSTEM_DEFAULT, max_tokens=None):
         while start > 0 and used + len(turns[start - 1]) <= budget:
             start -= 1
             used += len(turns[start])
-        # a window opening on an assistant turn is an answer to a question the model
-        # cannot see; drop it as well (but never the newest turn)
-        while start < len(turns) - 1 and history[start][0] != "user":
+        # a TRIMMED window opening on an assistant turn is an answer to a question the
+        # model cannot see; drop it as well (but never the newest turn). An untrimmed
+        # history is left exactly as given.
+        while 0 < start < len(turns) - 1 and history[start][0] != "user":
             start += 1
         if turns and start == len(turns):
             # even the newest turn alone is too long: keep its END, which is where the
             # question usually sits in a long paste
             role, text = history[-1]
-            head = enc.encode(B_USER if role == "user" else B_ASSISTANT, allowed_special=set())
+            head = encode_text(enc, heads[role])
             room = budget - len(head) - 1
             if room <= 0:
                 raise ValueError(f"max_tokens={max_tokens} leaves no room for a message")
-            body = enc.encode(text, allowed_special=set())[-room:]
+            body = encode_text(enc, text)[-room:]
+            # don't open on the tail bytes of a character the cut went through
+            while len(body) > 1 and enc.decode(body).startswith("�"):
+                body = body[1:]
             turns[-1] = head + body + [EOT_ID]
             start = len(turns) - 1
         turns = turns[start:]
 
     return prefix + [t for turn in turns for t in turn] + tail
+
+
+def encode_text(enc, text):
+    """Encode user-controlled text with no special tokens at all.
+
+    A visitor who types the literal string "<|endoftext|>" gets those characters as
+    ordinary tokens (7 of them), not the special token: otherwise they could end the
+    model's turn from inside their message, and tiktoken's default would raise instead.
+    For text without that string the result is identical to a plain encode.
+    """
+    return enc.encode(text, allowed_special=set(), disallowed_special=())
 
 
 # The head is tied to the token embedding (one tensor, two names), and safetensors
@@ -123,7 +139,8 @@ def load_exported(path):
     missing, unexpected = model.load_state_dict(state, strict=False)
     if unexpected or set(missing) != {TIED_KEY}:
         raise ValueError(f"{weights}: missing keys {missing}, unexpected keys {unexpected}")
-    assert model.lm_head.weight is model.transformer.wte.weight, "weight tying was lost"
+    if model.lm_head.weight is not model.transformer.wte.weight:
+        raise ValueError("weight tying between lm_head and wte was lost")
     return model, meta
 
 
@@ -139,7 +156,8 @@ def load_model(checkpoint=None, hf_model="gpt2", device="cuda"):
         ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False, mmap=True)
         cfg = ckpt["config"]
         model = GPT(GPTconfig(**cfg) if isinstance(cfg, dict) else cfg)
-        model.load_state_dict(ckpt["model"])
+        # a checkpoint saved from a torch.compile wrapper prefixes every key
+        model.load_state_dict({k.removeprefix("_orig_mod."): v for k, v in ckpt["model"].items()})
         print(f"loaded {checkpoint} (step {ckpt.get('step')}, "
               f"val_loss {ckpt.get('val_loss')})", file=sys.stderr)
     else:
@@ -197,7 +215,7 @@ def generate_stream(model, enc, prompt_ids, device, max_new_tokens=256,
     step_input = idx
 
     for _ in range(max_new_tokens):
-        if (past[0][0].size(2) if past else 0) + step_input.size(1) >= block_size:
+        if (past[0][0].size(2) if past else 0) + step_input.size(1) > block_size:
             break   # context full; build_chat_ids(max_tokens=...) keeps room for a reply
         ctx = (torch.autocast(device_type=device.split(":")[0], dtype=autocast_dtype)
                if autocast_dtype else torch.autocast(device_type="cpu", enabled=False))
@@ -304,12 +322,17 @@ def main(argv=None):
 
         if args.mode == "chat":
             history.append(("user", user))
-            ids = build_chat_ids(history, enc, args.system,
-                                 max_tokens=model.config.block_size - args.max_new_tokens)
+            try:
+                ids = build_chat_ids(history, enc, args.system,
+                                     max_tokens=model.config.block_size - args.max_new_tokens)
+            except ValueError as e:      # e.g. --max-new-tokens leaves no room for a prompt
+                history.pop()
+                print(f"[{e}; lower --max-new-tokens or shorten --system]", file=sys.stderr)
+                continue
             stop = {EOT_ID}
             print("bot> ", end="", flush=True)
         else:
-            ids = enc.encode(user, allowed_special=set())
+            ids = encode_text(enc, user)[-(model.config.block_size - 1):]
             # a base model emits <|endoftext|> at a document boundary; honouring it
             # keeps completions from running into unrelated text
             stop = {EOT_ID}

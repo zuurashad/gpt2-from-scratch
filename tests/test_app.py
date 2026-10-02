@@ -1,6 +1,8 @@
 """The demo's event handlers, without starting a web server."""
 
-from app import Models, header_markdown, message_text, to_turns
+import pytest
+
+from app import EMPTY_TURN, Models, header_markdown, message_text, to_turns
 from chat import EOT_ID
 
 
@@ -50,3 +52,30 @@ def test_header_shows_loss_and_tokens_seen():
     models.chat_meta = {"train_args": {"dataset": "databricks/databricks-dolly-15k"}}
     text = header_markdown(models)
     assert "3.081" in text and "2.5B training tokens" in text and "dolly" in text
+
+
+def test_app_notices_are_never_fed_back_and_same_role_turns_merge():
+    history = [{"role": "user", "content": "Hi"},
+               {"role": "assistant", "content": EMPTY_TURN},      # the app's notice, not model text
+               {"role": "user", "content": "Anyone there?"}]
+    assert to_turns(history, "Hello?") == [("user", "Hi\n\nAnyone there?\n\nHello?")]
+
+
+def test_an_empty_message_never_reaches_the_model(enc, scripted):
+    models = _models(scripted, enc, [EOT_ID])
+    outs = list(models.chat("   ", [], 0.7, 0.95, 50, 1.1, 32))
+    assert "Type a message" in outs[-1] and models.chat_model.calls == 0
+
+
+def test_a_near_zero_temperature_is_greedy_not_a_crash(enc, scripted):
+    models = _models(scripted, enc, enc.encode("Hi.") + [EOT_ID])
+    assert list(models.chat("Hi", [], 1e-38, 0.95, 50, 1.1, 32))[-1] == "Hi."
+
+
+def test_the_chat_box_has_a_stop_button(enc, scripted):
+    gr = pytest.importorskip("gradio")
+    from app import build_ui
+    ui = build_ui(_models(scripted, enc, [EOT_ID]))
+    # ChatInterface hides the button until a reply streams, then restores this setting
+    assert isinstance(ui.chat_interface, gr.ChatInterface)
+    assert ui.chat_interface.original_stop_btn is True
