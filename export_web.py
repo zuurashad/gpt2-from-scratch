@@ -9,11 +9,17 @@ Steps:
   1. export_hf.py: the standard GPT2LMHeadModel folder (with its logit check)
   2. optimum: ONNX graph with a KV cache ("text-generation-with-past")
   3. dynamic int8 quantisation of the weights (~4x smaller, so the first visit
-     downloads ~125MB, not ~500MB)
+     downloads ~125MB, not ~500MB), with a scale per output channel for the linear
+     layers: no bigger, and on the final base model it cut the cost by a third
   4. optimise_for_web: two graph rewrites that cut the browser's memory and time
      without changing what the model computes (see the function)
-  5. the cost of steps 3-4, measured: validation loss of the fp32 and the final int8
-     model on the same FineWeb-Edu tokens, written to <out>/quantisation.json
+  5. the cost of steps 3-4, measured against the fp32 model on the same FineWeb-Edu
+     tokens and written to <out>/quantisation.json, two ways:
+       - whole 1,024-token sequences in one pass (int8_minus_fp32). Dynamic
+         quantisation then shares one activation scale across all positions, so
+         this overstates the cost;
+       - token by token through the KV cache, exactly as the browser generates
+         (int8_minus_fp32_decoding): the cost a visitor actually gets
 
 Output: <out>/config.json, tokenizer files, onnx/model_quantized.onnx (what the browser
 loads) and model.safetensors (full precision, for anyone else).
@@ -141,7 +147,36 @@ def onnx_loss(path, tokens, rows, T=1024):
     return total / rows
 
 
-def export_web(src, out_dir, rows=50):
+def decoding_loss(path, tokens, rows, T=1024):
+    """The same loss, but one token per step through the KV cache, as generation runs
+    (num_logits_to_keep=1 when the graph has it). Slow: T steps per row."""
+    import onnxruntime as ort
+    sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+    names = {i.name for i in sess.get_inputs()}
+    kv = [i for i in sess.get_inputs() if i.name.startswith("past_key_values")]
+    total = 0.0
+    for r in range(rows):
+        row = tokens[r * T: (r + 1) * T + 1].astype(np.int64)
+        past = [np.zeros((1, i.shape[1], 0, i.shape[3]), dtype=np.float32) for i in kv]
+        nll = 0.0
+        for t in range(T):
+            feed = {"input_ids": row[None, t:t + 1]}
+            if "attention_mask" in names:
+                feed["attention_mask"] = np.ones((1, t + 1), dtype=np.int64)
+            if "position_ids" in names:
+                feed["position_ids"] = np.array([[t]], dtype=np.int64)
+            if KEEP in names:
+                feed[KEEP] = np.array(1, dtype=np.int64)
+            feed.update({i.name: p for i, p in zip(kv, past)})
+            logits, *past = sess.run(None, feed)
+            z = logits[0, -1].astype(np.float64)
+            top = z.max()
+            nll += top + np.log(np.exp(z - top).sum()) - z[row[t + 1]]
+        total += nll / T
+    return total / rows
+
+
+def export_web(src, out_dir, rows=50, decoding_rows=8):
     from onnxruntime.quantization import QuantType, quantize_dynamic
     from optimum.exporters.onnx import main_export
 
@@ -157,7 +192,7 @@ def export_web(src, out_dir, rows=50):
             if extra.startswith("model.onnx_"):
                 shutil.copy(os.path.join(tmp, extra), os.path.join(out_dir, "onnx", extra))
     q8 = os.path.join(out_dir, "onnx", "model_quantized.onnx")
-    quantize_dynamic(fp32, q8, weight_type=QuantType.QInt8)
+    quantize_dynamic(fp32, q8, weight_type=QuantType.QInt8, per_channel=True)
     optimise_for_web(q8)
 
     tokens = np.load(val_shard(), mmap_mode="r")
@@ -167,6 +202,14 @@ def export_web(src, out_dir, rows=50):
               "size_fp32_onnx_MB": round(os.path.getsize(fp32) / 1e6),
               "size_int8_onnx_MB": round(os.path.getsize(q8) / 1e6)}
     report["int8_minus_fp32"] = round(report["val_loss_int8_onnx"] - report["val_loss_fp32_onnx"], 5)
+    if decoding_rows:
+        # fp32 gives the same answer however the sequence is split, so its one-pass loss
+        # on the same rows is the reference for the token-by-token int8 loss
+        report["decoding_tokens"] = decoding_rows * 1024
+        report["val_loss_fp32_decoding"] = round(onnx_loss(fp32, tokens, decoding_rows), 5)
+        report["val_loss_int8_decoding"] = round(decoding_loss(q8, tokens, decoding_rows), 5)
+        report["int8_minus_fp32_decoding"] = round(
+            report["val_loss_int8_decoding"] - report["val_loss_fp32_decoding"], 5)
     with open(os.path.join(out_dir, "quantisation.json"), "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
     os.remove(fp32)              # the browser loads int8; full precision ships as safetensors
@@ -179,8 +222,10 @@ def main(argv=None):
     p.add_argument("src", help="an export.py folder")
     p.add_argument("out_dir")
     p.add_argument("--rows", type=int, default=50, help="1024-token rows for the loss check")
+    p.add_argument("--decoding-rows", type=int, default=8,
+                   help="rows for the token-by-token check (~2 min per row on a CPU; 0 skips it)")
     args = p.parse_args(argv)
-    print(json.dumps(export_web(args.src, args.out_dir, args.rows), indent=2))
+    print(json.dumps(export_web(args.src, args.out_dir, args.rows, args.decoding_rows), indent=2))
     return 0
 
 

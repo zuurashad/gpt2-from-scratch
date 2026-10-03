@@ -51,7 +51,7 @@ def build_web_model(out_dir, seed=0, quantise=True):
         fp32 = os.path.join(tmp, "model.onnx")
         target = os.path.join(out_dir, "onnx", "model_quantized.onnx")
         if quantise:
-            quantize_dynamic(fp32, target, weight_type=QuantType.QInt8)
+            quantize_dynamic(fp32, target, weight_type=QuantType.QInt8, per_channel=True)
             shutil.copy(target, os.path.join(out_dir, "onnx", "model_quantized.orig.onnx"))
             optimise_for_web(target)
         else:

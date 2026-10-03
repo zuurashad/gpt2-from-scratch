@@ -11,7 +11,7 @@ pytest.importorskip("optimum.exporters.onnx")
 ort = pytest.importorskip("onnxruntime")
 onnx = pytest.importorskip("onnx")
 
-from export_web import KEEP, onnx_loss  # noqa: E402
+from export_web import KEEP, decoding_loss, onnx_loss  # noqa: E402
 from tiny_web_model import build_web_model  # noqa: E402
 
 T = 48
@@ -21,8 +21,10 @@ T = 48
 def graphs(tmp_path_factory):
     folder = build_web_model(str(tmp_path_factory.mktemp("tiny")), seed=0, quantise=True)
     onnx_dir = os.path.join(folder, "onnx")
+    fp32 = build_web_model(str(tmp_path_factory.mktemp("tiny32")), seed=0, quantise=False)
     return {"orig": os.path.join(onnx_dir, "model_quantized.orig.onnx"),
-            "opt": os.path.join(onnx_dir, "model_quantized.onnx")}
+            "opt": os.path.join(onnx_dir, "model_quantized.onnx"),
+            "fp32": os.path.join(fp32, "onnx", "model_quantized.onnx")}   # fp32 under the page's file name
 
 
 def run(path, ids, keep=None, past=None):
@@ -57,6 +59,11 @@ def test_head_reads_int8_weights_and_slices_positions(graphs):
     assert ops.count("MatMul") == orig_ops.count("MatMul") - 1    # the fp32 head is gone
     producer = {o: n for n in model.graph.node for o in n.output}
     assert producer["logits"].op_type == "Mul"
+    # the linear layers carry a scale per output channel (the export's per_channel=True)
+    inits = {t.name: t for t in model.graph.initializer}
+    zero_points = [inits[n.input[3]] for n in model.graph.node
+                   if n.op_type == "MatMulInteger" and len(n.input) > 3 and n.input[3] in inits]
+    assert any(len(z.dims) == 1 and z.dims[0] > 1 for z in zero_points)
     # the download does not grow: the transposed embedding is folded when the session starts
     assert abs(os.path.getsize(graphs["opt"]) - os.path.getsize(graphs["orig"])) < 4096
 
@@ -101,3 +108,18 @@ def test_loss_check_scores_every_position_of_the_rewritten_graph(graphs):
     tokens = np.random.default_rng(9).integers(0, 50257, 3 * T + 1)
     orig, opt = onnx_loss(graphs["orig"], tokens, rows=3, T=T), onnx_loss(graphs["opt"], tokens, rows=3, T=T)
     assert np.isfinite(opt) and abs(opt - orig) < 0.01
+
+
+def test_token_by_token_loss_equals_the_one_pass_loss_in_fp32(graphs):
+    # fp32 does not depend on how a sequence is split, so the two measurements must agree;
+    # this pins decoding_loss's cache handling (positions, masks, past keys and values)
+    tokens = np.random.default_rng(5).integers(0, 50257, 2 * T + 1)
+    one_pass = onnx_loss(graphs["fp32"], tokens, rows=2, T=T)
+    stepwise = decoding_loss(graphs["fp32"], tokens, rows=2, T=T)
+    assert abs(one_pass - stepwise) < 1e-4
+
+
+def test_token_by_token_loss_runs_on_the_rewritten_int8_graph(graphs):
+    tokens = np.random.default_rng(6).integers(0, 50257, 2 * T + 1)
+    stepwise = decoding_loss(graphs["opt"], tokens, rows=2, T=T)
+    assert np.isfinite(stepwise) and abs(stepwise - onnx_loss(graphs["opt"], tokens, rows=2, T=T)) < 0.05
