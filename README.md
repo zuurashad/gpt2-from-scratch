@@ -2,17 +2,83 @@
 
 A PyTorch reproduction of GPT-2 small (124M parameters), trained from scratch (random
 initialisation) on 2.5 billion tokens of FineWeb-Edu on a single 6GB laptop GPU, then
-fine-tuned into a chatbot and deployed as a free CPU web demo. With OpenAI's released
+fine-tuned into a chatbot that runs entirely in your web browser. With OpenAI's released
 weights loaded, the implementation reproduces the reference GPT-2's logits to within 7e-5.
 
-**[Try the live demo](https://huggingface.co/spaces/zuu007/gpt2-from-scratch)** ·
-[model weights](https://huggingface.co/zuu007/gpt2-from-scratch) ·
+**[Try the chatbot in your browser](https://zuu007-gpt2-from-scratch.static.hf.space)** ·
+[Hugging Face Space](https://huggingface.co/spaces/zuu007/gpt2-from-scratch) ·
+weights: [base](https://huggingface.co/zuu007/gpt2-from-scratch),
+[chat](https://huggingface.co/zuu007/gpt2-from-scratch-chat) ·
 [![tests](https://github.com/zuurashad/gpt2-from-scratch/actions/workflows/tests.yml/badge.svg)](https://github.com/zuurashad/gpt2-from-scratch/actions/workflows/tests.yml)
 
 <!-- RESULTS:START -->
 ## Results
 
-_Pretraining is in progress. This section is filled in from the final logs._
+The run took 4,768 steps of 524,288 tokens: **2.5B tokens of FineWeb-Edu, one pass with
+no token repeated**. It took **33.7 GPU-hours** on an RTX 4050 Laptop GPU (6GB), at a
+median of 20.6k tokens/s. A reboot part-way through was resumed from the step-2,750
+checkpoint.
+
+| | this model | OpenAI GPT-2 124M |
+|---|---|---|
+| validation loss (FineWeb-Edu, the same 409,600 held-out tokens, fp32) | 3.300 | 3.242 |
+| HellaSwag (`acc_norm`, all 10,042) | 27.03% | 29.55% |
+| ARC-Easy (`acc_norm`) | 42.30% | 38.17% |
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/training_dark.png">
+  <img alt="Training and validation loss falling from 10.95 to 3.30 over 2.5B tokens, approaching OpenAI GPT-2's 3.24; HellaSwag accuracy on the first 1,000 examples rising to 32.9% against GPT-2's 33.6%" src="assets/training_light.png">
+</picture>
+
+Its 2.5B tokens are a quarter of Karpathy's 10B reference run.
+- **Behind OpenAI's GPT-2:** slightly, on validation loss and HellaSwag. LAMBADA, which
+  predicts the last word of a long passage, is the clearest gap.
+- **Ahead:** on ARC-Easy and Winogrande.
+
+Every benchmark below uses the same harness ([`evals.py`](evals.py), zero-shot, fp32) for
+both models. Raw results: [`results/`](results).
+
+| benchmark | metric | this model | OpenAI GPT-2 124M | examples |
+|---|---|---|---|---|
+| HellaSwag | acc_norm | 27.03% | 29.55% | 10,042 |
+| ARC-Easy | acc_norm | 42.30% | 38.17% | 2,376 |
+| ARC-Challenge | acc_norm | 23.21% | 22.95% | 1,172 |
+| PIQA | acc_norm | 60.45% | 61.81% | 1,838 |
+| OpenBookQA | acc_norm | 27.00% | 27.20% | 500 |
+| Winogrande | acc_norm | 52.96% | 51.62% | 1,267 |
+| BoolQ | acc_norm | 52.19% | 48.64% | 3,269 |
+| LAMBADA | acc | 20.80% | 32.56% | 5,153 |
+| LAMBADA | perplexity | 81.1 | 18.0 | 5,153 |
+
+BoolQ is below the 62% you'd get by always answering "yes" for both models, so it says
+little at this size.
+
+### The chat model
+
+Supervised fine-tuning on `databricks-dolly-15k`:
+- **Data:** 14,517 training conversations and 296 held out. 198 examples longer than
+  1,024 tokens were dropped rather than truncated.
+- **Training:** 3 epochs (1,359 steps, 32 conversations each), learning rate 3e-5.
+- **Result:** validation loss on the held-out answers of **2.654**.
+
+Unedited replies from the in-browser (int8) chat model at the page's default settings:
+
+> **What is the capital of France?**
+> Paris
+
+> **Give me three tips for staying focused while studying.**
+> 1. Use a focus journal to keep your mind active
+> 2. Use a computer to practice concentration
+> 3. Avoid distractions like phone calls or screens
+
+> **Explain what a neural network is in two sentences.**
+> A neural network is a type of machine learning. A neural network is a machine learning
+> model that can learn from data and improve on it. Neural networks are very useful
+> because they provide data- and-information based services, which can be used for
+> training and evaluation.
+
+At 124M parameters it follows the format, answers simple questions and stops when it's
+done. Beyond that it is often vague or wrong, which is expected at this size.
 <!-- RESULTS:END -->
 
 ## What's in the repo
@@ -159,20 +225,31 @@ builds at inference time.
 - The tied embedding/output matrix is stored once.
 - The export is reloaded and must reproduce the original logits bit for bit before it
   counts.
-- bf16 would halve the size, but it measurably changes a fully trained model's
-  predictions, so the published weights are fp32.
+- bf16 would halve the size. On the final model it leaves validation loss unchanged
+  (−0.00007) but flips 0.28% of top-1 predictions, so the published weights stay fp32.
 
 The demo runs entirely in the visitor's browser, so there is no server to pay for, sleep
-or go down. [`export_hf.py`](export_hf.py) writes the weights in the standard Hugging Face
-GPT-2 layout, which matches this repo's model to 1e-5 and needs no custom code.
-[`export_web.py`](export_web.py) turns that into an int8 ONNX graph with a KV cache:
-- about 125MB instead of 500MB
-- validation loss changes by less than 0.001 (measured, written alongside the weights)
+or go down.
+- [`export_hf.py`](export_hf.py) writes the weights in the standard Hugging Face GPT-2
+  layout, which needs no custom code. On 20,480 validation tokens it matches this repo's
+  model to 4.4e-5, with identical top-1 predictions.
+- [`export_web.py`](export_web.py) turns that into a per-channel int8 ONNX graph with a KV
+  cache: **126MB instead of 500MB**.
 
-The page itself ([`web/`](web)) uses transformers.js on WebAssembly. Its chat template
-is ported line for line from `chat.py`, and a test runs it in a headless browser to
-check that it builds token-identical prompts. On a laptop CPU it generates over 20
-tokens/s.
+Measured cost of int8 (written alongside the weights in `quantisation.json`):
+
+| | base | chat |
+|---|---|---|
+| validation loss vs fp32, generating token by token as the page does (8,192 tokens) | +0.0018 | +0.0013 |
+| the same over one forward pass of 51,200 tokens (a conservative bound) | +0.0048 | +0.0058 |
+
+The page itself ([`web/`](web)) uses transformers.js on WebAssembly:
+- **Prompts:** its chat template and sampling rule are ported from `chat.py`. Tests run
+  them in a headless browser and check that the prompts are token-identical and the
+  sampling filters bit-identical.
+- **Speed:** on this laptop's CPU it generates about 39 tokens/s when opened directly,
+  where it can use several threads. Inside the Hugging Face page frame it runs on one
+  thread, so it's slower.
 
 ## Reproduce it
 
@@ -207,7 +284,7 @@ python chat.py --checkpoint export/chat --mode chat          # chat in the termi
 Package the models for the browser, and run the demo or a local server (CPU only):
 
 ```bash
-pip install "optimum-onnx[onnxruntime]" accelerate   # in a separate environment
+pip install -r requirements-web.txt                # in a separate environment
 python export_web.py export/base web-models/base
 python export_web.py export/chat web-models/chat
 
