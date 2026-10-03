@@ -234,7 +234,8 @@ def main(argv=None):
         model = GPT.from_pretrained(args.model)
 
     model.to(device)
-    torch.set_float32_matmul_precision("high")
+    # "highest" keeps --dtype fp32 truly fp32 (no TF32), so a GPU run matches a CPU one
+    torch.set_float32_matmul_precision("high" if autocast_dtype is not None else "highest")
     result = evaluate(model, device, device_type, autocast_dtype, split=args.split,
                       limit=args.limit, block_size=model.config.block_size,
                       log_every=args.log_every)

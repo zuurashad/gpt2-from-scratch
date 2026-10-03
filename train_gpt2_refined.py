@@ -18,6 +18,7 @@ Typical use:
 from __future__ import annotations
 
 import argparse
+import gc
 import inspect
 import json
 import logging
@@ -835,6 +836,11 @@ def main(argv=None):
                 logger.warning("arg '%s' changed across the resume: %s -> %s",
                                key, saved_args[key], getattr(args, key))
         logger.info("resumed at step %d/%d", start_step, args.max_steps)
+        # ckpt was loaded onto the training device: without this its copy of the weights
+        # (~500MB) stays resident for the rest of the run
+        del ckpt
+        gc.collect()
+        torch.cuda.empty_cache()
         if start_step >= args.max_steps:
             logger.info("checkpoint is already at or past --max-steps; nothing left to train")
 
