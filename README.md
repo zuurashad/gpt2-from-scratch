@@ -80,6 +80,8 @@ copied from [`results/chat_samples.json`](results/chat_samples.json):
 
 At 124M parameters it follows the format, answers simple questions and stops when it's
 done. Beyond that it is often vague or wrong, which is expected at this size.
+
+**Known limitation: follow-up questions.** The chat model was fine-tuned only on single-turn examples (Dolly-15k), so it never learned to prioritise the newest message in a conversation. With 124M parameters it tends to continue the topic that fills most of its context, so an unrelated follow-up often gets an answer about the earlier question. Press **Clear** before changing topic. Multi-turn fine-tuning data (e.g. OpenAssistant) would be the fix.
 <!-- RESULTS:END -->
 
 ## What's in the repo

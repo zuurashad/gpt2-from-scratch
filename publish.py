@@ -117,6 +117,7 @@ def model_card(kind, folder, ids, evals=None, baseline=None, val_loss=None):
                  f"{loss}. It continues text; it was not trained to follow instructions.")
         datasets = "  - HuggingFaceFW/fineweb-edu"
         prompt, chat_note = '"Photosynthesis is the process by which"', ""
+        chat_limitation = ""
     else:
         title = "GPT-2 (124M), trained from scratch: chat model"
         intro = (f"[{ids['base']}](https://huggingface.co/{ids['base']}) after supervised "
@@ -128,12 +129,20 @@ def model_card(kind, folder, ids, evals=None, baseline=None, val_loss=None):
                      "each turn is `<|system|>`, `<|user|>` or `<|assistant|>` plus a newline "
                      "and the text, ended by the single token `<|endoftext|>` (id 50256), where "
                      "it also stops. The role markers are plain text, not special tokens.\n")
+        chat_limitation = (
+            "\n**Known limitation: follow-up questions.** The chat model was fine-tuned only "
+            "on single-turn examples (Dolly-15k), so it never learned to prioritise the newest "
+            "message in a conversation. With 124M parameters it tends to continue the topic "
+            "that fills most of its context, so an unrelated follow-up often gets an answer "
+            "about the earlier question. Press **Clear** before changing topic. Multi-turn "
+            "fine-tuning data (e.g. OpenAssistant) would be the fix.\n")
     return fill(read("space/MODEL_CARD.md"), {
         "TITLE": title, "INTRO": intro, "DATASETS_YAML": datasets,
         "REPO_URL": REPO_URL, "REPO_DISPLAY": REPO_URL.removeprefix("https://"),
         # the page opened directly can use several CPU threads; inside the Hub's frame it can't
         "SPACE_URL": f"https://{ids['space'].replace('/', '-')}.static.hf.space",
         "REPO_ID": ids[kind], "EXAMPLE_PROMPT": prompt, "CHAT_NOTE": chat_note,
+        "CHAT_LIMITATION": chat_limitation,
         "Q8_DELTA": f"{quant['int8_minus_fp32']:.4f}", "Q8_TOKENS": f"{quant['tokens']:,}",
         "Q8_DECODING": f"{quant['int8_minus_fp32_decoding']:.4f}",
         "Q8_DECODING_TOKENS": f"{quant['decoding_tokens']:,}",

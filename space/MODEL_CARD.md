@@ -51,7 +51,7 @@ This is a 124M-parameter model trained on {{TOKENS}} tokens. It writes fluent En
 but it is frequently wrong, especially about facts, arithmetic and recent events. Its
 only alignment is supervised fine-tuning on a small instruction dataset, so it can
 produce incorrect or inappropriate text.
-
+{{CHAT_LIMITATION}}
 ## Data and licences
 
 - Pretraining: [FineWeb-Edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu)
