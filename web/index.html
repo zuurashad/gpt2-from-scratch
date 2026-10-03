@@ -7,6 +7,10 @@
   <meta name="description" content="Chat with a GPT-2 (124M) model trained from scratch on a single laptop GPU. Runs entirely in your browser.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232a63c7'/%3E%3Ctext x='16' y='22' font-family='Arial' font-size='15' font-weight='700' fill='white' text-anchor='middle'%3EG2%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="style.css">
+  <!-- open the connections the first visit needs while the page is still parsing -->
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="preconnect" href="https://huggingface.co" crossorigin>
+  <link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.0" crossorigin>
 </head>
 <body>
   <main>
@@ -73,6 +77,7 @@
     </details>
 
     <p id="status" class="status" role="status">Loading…</p>
+    <noscript><p class="status">This demo runs the model in your browser, so it needs JavaScript.</p></noscript>
 
     <footer>
       <strong>What to expect.</strong> 124M parameters is GPT-2 <em>small</em>. It writes fluent
@@ -82,5 +87,9 @@
     </footer>
   </main>
   <script type="module" src="app.js"></script>
+  <script nomodule>
+    document.getElementById("status").textContent =
+      "Sorry: this browser is too old to run the model. A recent Chrome, Edge, Firefox or Safari can.";
+  </script>
 </body>
 </html>
