@@ -1,0 +1,22 @@
+[
+  {
+    "q": "What is the capital of France?",
+    "a": "Paris",
+    "status": "1 tokens; the first after 0.1 s (all on your CPU)"
+  },
+  {
+    "q": "Explain what a neural network is in two sentences.",
+    "a": "A neural network is a type of machine learning.  A neural network is a machine learning model that can learn from data and improve on it.  Neural networks are very useful because they provide data- and-information based services, which can be used for training and evaluation.",
+    "status": "55 tokens, 39.2 tokens/s; the first after 0.1 s (all on your CPU)"
+  },
+  {
+    "q": "Give me three tips for staying focused while studying.",
+    "a": "1. Use a focus journal to keep your mind active\n2. Use a computer to practice concentration\n3. Avoid distractions like phone calls or screens",
+    "status": "30 tokens, 38.1 tokens/s; the first after 0.1 s (all on your CPU)"
+  },
+  {
+    "q": "Write a short poem about the sea.",
+    "a": "The sea is blue, the stars are red",
+    "status": "9 tokens, 35.2 tokens/s; the first after 0.1 s (all on your CPU)"
+  }
+]

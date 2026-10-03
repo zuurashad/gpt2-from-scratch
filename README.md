@@ -61,21 +61,22 @@ Supervised fine-tuning on `databricks-dolly-15k`:
 - **Training:** 3 epochs (1,359 steps, 32 conversations each), learning rate 3e-5.
 - **Result:** validation loss on the held-out answers of **2.654**.
 
-Unedited replies from the in-browser (int8) chat model at the page's default settings:
+Unedited replies from the in-browser (int8) chat model at the page's default settings,
+copied from [`results/chat_samples.json`](results/chat_samples.json):
 
 > **What is the capital of France?**
+>
 > Paris
 
 > **Give me three tips for staying focused while studying.**
+>
 > 1. Use a focus journal to keep your mind active
 > 2. Use a computer to practice concentration
 > 3. Avoid distractions like phone calls or screens
 
 > **Explain what a neural network is in two sentences.**
-> A neural network is a type of machine learning. A neural network is a machine learning
-> model that can learn from data and improve on it. Neural networks are very useful
-> because they provide data- and-information based services, which can be used for
-> training and evaluation.
+>
+> A neural network is a type of machine learning.  A neural network is a machine learning model that can learn from data and improve on it.  Neural networks are very useful because they provide data- and-information based services, which can be used for training and evaluation.
 
 At 124M parameters it follows the format, answers simple questions and stops when it's
 done. Beyond that it is often vague or wrong, which is expected at this size.
