@@ -57,14 +57,38 @@ def js():
     return result
 
 
+def reference(case, i, top_p):
+    return _filter_logits(torch.from_numpy(logits_for(case, i))[None].clone(), case["topK"], top_p,
+                          case["repetitionPenalty"], case["generated"], V)[0].numpy()
+
+
+def mass_before(logits):
+    """float64 probability mass of all better candidates, for each candidate token."""
+    ids = np.flatnonzero(np.isfinite(logits))
+    ids = ids[np.argsort(-logits[ids], kind="stable")]
+    z = logits[ids].astype(np.float64)
+    p = np.exp(z - z.max())
+    p /= p.sum()
+    out = np.full(logits.shape, np.nan)
+    out[ids] = np.cumsum(p) - p
+    return out
+
+
 @pytest.mark.parametrize("i", range(len(CASES)))
-def test_browser_filter_is_bit_identical_to_chat_py(js, i):
+def test_browser_filter_matches_chat_py(js, i):
     case = CASES[i]
-    ref = _filter_logits(torch.from_numpy(logits_for(case, i))[None].clone(), case["topK"], case["topP"],
-                         case["repetitionPenalty"], case["generated"], V)[0].numpy()
+    ref = reference(case, i, case["topP"])
     got = np.array(js["filtered"][i], dtype=np.float32)
-    assert np.array_equal(np.isfinite(got), np.isfinite(ref))       # the same tokens survive
-    assert np.array_equal(got[np.isfinite(got)], ref[np.isfinite(ref)])   # with the same values
+    differ = np.flatnonzero(np.isfinite(got) != np.isfinite(ref))
+    if differ.size:
+        # only at the top-p cut: chat.py adds up float32 probabilities with torch's cumsum
+        # (whose summation order differs between platforms), JS adds float64, so a token
+        # whose preceding mass is within rounding of top_p may land on either side
+        assert 0 < case["topP"] < 1 and differ.size <= 3, differ
+        before = mass_before(reference(case, i, 0))          # after penalty and top-k
+        assert np.all(np.abs(before[differ] - case["topP"]) < 1e-4), before[differ]
+    both = np.isfinite(got) & np.isfinite(ref)
+    assert np.array_equal(got[both], ref[both])              # survivors keep bit-identical values
     if case.get("ties"):
         assert np.isfinite(got).sum() == 20
 
