@@ -84,7 +84,7 @@ def eval_section(ours_path, baseline_path):
 
     def cell(r, key):
         v = (r or {}).get(key)
-        return "-" if v is None else (f"{v:.2f}" if key == "ppl" else f"{100 * v:.1f}%")
+        return "-" if v is None else (f"{v:.1f}" if key == "ppl" else f"{100 * v:.2f}%")
 
     rows = ["## Evaluation", "",
             "Zero-shot, in fp32, scored by per-choice log-likelihood (`acc`, and "
@@ -101,7 +101,7 @@ def eval_section(ours_path, baseline_path):
     return "\n".join(rows)
 
 
-def model_card(kind, folder, ids, evals=None, baseline=None):
+def model_card(kind, folder, ids, evals=None, baseline=None, val_loss=None):
     meta = load_json(folder, "training.json")
     quant = load_json(folder, "quantisation.json")
     args = meta.get("train_args") or {}
@@ -111,9 +111,10 @@ def model_card(kind, folder, ids, evals=None, baseline=None):
         tokens = f"{(base_meta['step'] + 1) * args['total_batch_size'] / 1e9:.1f}B"
     if kind == "base":
         title = "GPT-2 (124M), trained from scratch: base model"
+        # prefer val_loss.py's fp32 figure (the checkpoint's own is bf16, one step stale)
+        loss = f"{val_loss:.3f}" if val_loss is not None else f"{meta['val_loss']:.4f}"
         intro = (f"The pretrained model: {tokens} tokens of FineWeb-Edu, validation loss "
-                 f"{meta['val_loss']:.4f}. It continues text; it was not trained to follow "
-                 "instructions.")
+                 f"{loss}. It continues text; it was not trained to follow instructions.")
         datasets = "  - HuggingFaceFW/fineweb-edu"
         prompt, chat_note = '"Photosynthesis is the process by which"', ""
     else:
@@ -130,9 +131,12 @@ def model_card(kind, folder, ids, evals=None, baseline=None):
     return fill(read("space/MODEL_CARD.md"), {
         "TITLE": title, "INTRO": intro, "DATASETS_YAML": datasets,
         "REPO_URL": REPO_URL, "REPO_DISPLAY": REPO_URL.removeprefix("https://"),
-        "SPACE_URL": f"https://huggingface.co/spaces/{ids['space']}",
+        # the page opened directly can use several CPU threads; inside the Hub's frame it can't
+        "SPACE_URL": f"https://{ids['space'].replace('/', '-')}.static.hf.space",
         "REPO_ID": ids[kind], "EXAMPLE_PROMPT": prompt, "CHAT_NOTE": chat_note,
         "Q8_DELTA": f"{quant['int8_minus_fp32']:.4f}", "Q8_TOKENS": f"{quant['tokens']:,}",
+        "Q8_DECODING": f"{quant['int8_minus_fp32_decoding']:.4f}",
+        "Q8_DECODING_TOKENS": f"{quant['decoding_tokens']:,}",
         "TOKENS": tokens,
         "EVAL_SECTION": eval_section(evals, baseline) if kind == "base" else "",
     })
@@ -161,6 +165,8 @@ def build_parser():
     p.add_argument("--user", default=None, help="Hub namespace (default: the logged-in user)")
     p.add_argument("--evals", default=None, help="evals.py --out JSON for the base model")
     p.add_argument("--baseline", default=None, help="evals.py --out JSON for OpenAI gpt2")
+    p.add_argument("--val-loss", type=float, default=None,
+                   help="the base model's val_loss.py (fp32) figure, for its card")
     # private unless asked: an accidental run must never publish, or flip a private
     # repo to public
     p.add_argument("--public", action="store_true",
@@ -181,7 +187,8 @@ def main(argv=None):
 
     with tempfile.TemporaryDirectory() as stage:
         assemble_space(stage, ids)
-        cards = {k: model_card(k, folders[k], ids, args.evals, args.baseline) for k in folders}
+        cards = {k: model_card(k, folders[k], ids, args.evals, args.baseline, args.val_loss)
+                 for k in folders}
         if args.dry_run:
             for kind, folder in folders.items():
                 present = [f for f in MODEL_FILES if os.path.exists(os.path.join(folder, f))]

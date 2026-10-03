@@ -18,7 +18,8 @@ def _export(folder, stage, source, base=None):
             "train_args": {"total_batch_size": 524288,
                            "dataset": "databricks/databricks-dolly-15k"}}
     files = {"training.json": json.dumps(meta),
-             "quantisation.json": json.dumps({"int8_minus_fp32": 0.0008, "tokens": 51200}),
+             "quantisation.json": json.dumps({"int8_minus_fp32": 0.0008, "tokens": 51200,
+                                           "int8_minus_fp32_decoding": 0.0013, "decoding_tokens": 8192}),
              "config.json": "{}", "model.safetensors": "w", "onnx/model_quantized.onnx": "q",
              "sft_final.pt": "a pickle that must never be uploaded"}
     for name, text in files.items():
@@ -105,7 +106,7 @@ def test_model_cards_are_filled_in(exports, hub):
     publish.main(exports + ["--user", "zuu007"])
     cards = [c["text"] for c in hub if c["call"] == "upload_file"]
     assert len(cards) == 2 and all("{{" not in card for card in cards)
-    assert all("+0.0008" in card for card in cards)          # the int8 cost is stated
+    assert all("+0.0008" in card and "+0.0013" in card for card in cards)   # both int8 costs stated
 
 
 def test_a_chat_model_from_a_different_base_is_refused(tmp_path, hub):

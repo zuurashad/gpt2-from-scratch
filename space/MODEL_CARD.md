@@ -28,7 +28,7 @@ context and the GPT-2 BPE tokenizer. The weights load into Hugging Face's
 | file | what it is |
 |---|---|
 | `model.safetensors` | full-precision (fp32) weights |
-| `onnx/model_quantized.onnx` | int8 ONNX for the browser demo. Validation loss +{{Q8_DELTA}} vs fp32 ({{Q8_TOKENS}} FineWeb-Edu tokens) |
+| `onnx/model_quantized.onnx` | per-channel int8 ONNX for the browser demo. Validation loss vs fp32: +{{Q8_DECODING}} generating token by token ({{Q8_DECODING_TOKENS}} FineWeb-Edu tokens), +{{Q8_DELTA}} over one forward pass ({{Q8_TOKENS}} tokens) |
 | `training.json` | training step, validation loss and the training arguments |
 
 ## Use it
